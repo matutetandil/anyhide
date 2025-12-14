@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Keys (NEVER commit private keys)
+*.key
+*.pub
+
+# Test files
+test_*.txt
+carrier*.txt
+
+# Local config
+CLAUDE.local.md
+
+# OS files
+.DS_Store
+Thumbs.db

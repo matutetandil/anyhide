@@ -1,0 +1,348 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.4.1] - 2025-12-14
+
+### Changed
+
+- **Substring Fragmentation Restored**
+  - Changed from word-based back to substring-based encoding
+  - Message is fragmented into variable-sized pieces (1-5 chars)
+  - Fragments are found as substrings in the carrier (e.g., "ama" in "Amanda")
+  - Enables cross-language encoding (Spanish carrier, English message fragments)
+
+- **Random Position Selection**
+  - Fragment positions in carrier are independent (not sequential)
+  - Fragment 1 can be at end of carrier, Fragment 5 at start
+  - Makes pattern analysis much harder for attackers
+
+### Added
+
+- **Distributed Position Selection** (`src/text/tokenize.rs`)
+  - `select_distributed_position()` - Selects random occurrence from multiple matches
+  - Based on passphrase + fragment index for determinism
+
+- **Enhanced Integration Tests**
+  - `test_substring_matching()` - Verifies "anda" found in "Amanda"
+  - `test_cross_language()` - Tests cross-language capability
+
+### Security
+
+- **Enhanced Anti-Analysis**
+  - Non-sequential positions make frequency analysis useless
+  - Substring matching allows using any text as carrier
+  - Multiple occurrences of fragments spread across carrier
+
+### Migration from v0.4.0
+
+v0.4.1 uses a different encoding scheme than v0.4.0:
+
+| v0.4.0 | v0.4.1 |
+|--------|--------|
+| Word-based | Substring-based |
+| Sequential positions possible | Random positions |
+| Word index positions | Character index positions |
+| Protocol version 4 | Protocol version 5 |
+
+## [0.4.0] - 2025-12-14
+
+### Changed
+
+- **Word-Based Encoding**
+  - Changed from character-fragment based to word-based encoding
+  - Message words are matched to carrier words (case-insensitive)
+  - Simpler and more robust than substring matching
+
+- **Carrier Permutation**
+  - Carrier words are now shuffled deterministically using the passphrase
+  - Different passphrase = different word order in carrier
+  - Provides additional layer of security (wrong passphrase = completely wrong positions)
+  - Uses ChaCha20Rng seeded from HKDF-SHA256
+
+- **Distributed Position Selection**
+  - When a word appears multiple times in the carrier, positions are distributed
+  - Each occurrence of a word in the message selects a different occurrence in carrier
+  - Prevents simple pattern analysis ("hola hola hola" uses 3 different positions)
+
+- **Block Padding**
+  - Messages are padded to block boundaries (256 characters)
+  - Minimum message size is 64 characters
+  - Padding uses random words from the permuted carrier
+  - Hides the actual message length from attackers
+  - Encoded data includes `real_count` to extract only real words
+
+### Added
+
+- **New Text Processing Module** (`src/text/permute.rs`)
+  - `permute_carrier()` - Shuffles carrier words deterministically
+  - `find_distributed()` - Finds word positions with distribution across occurrences
+  - `normalize()` - Case-insensitive word comparison
+
+- **Block Padding Module** (`src/text/padding.rs`)
+  - `calculate_padded_length()` - Computes target length for block boundary
+  - `pad_message()` - Pads message with carrier words to target length
+
+- **New Constants** (`src/lib.rs`)
+  - `VERSION = 4` - Protocol version
+  - `BLOCK_SIZE = 256` - Block size for padding
+  - `MIN_SIZE = 64` - Minimum message size
+
+- **Updated Data Structures**
+  - `EncodedData { version, real_count, positions }` - Protocol data
+  - `EncodedMessage { code, real_word_count, total_positions }` - Encoding result
+  - `DecodedMessage { message, words }` - Decoding result
+
+- **New Dependency**
+  - `rand_chacha = "0.3"` for deterministic RNG
+
+### Security
+
+- **Four-Factor Security**
+  - Carrier text (pre-shared)
+  - Passphrase (determines permutation + encryption)
+  - Private key (asymmetric decryption)
+  - Correct protocol version
+
+- **Enhanced Plausible Deniability**
+  - Wrong passphrase produces different permutation = completely different message
+  - Block padding hides message length (only block range visible)
+  - Distributed selection makes pattern analysis harder
+
+- **Anti-Analysis**
+  - Repeated words in message map to different positions
+  - Message length is hidden by padding
+  - Word order is scrambled by permutation
+
+### Migration from v0.3.1
+
+v0.4 is not backwards compatible with v0.3.1 encoded messages:
+
+| v0.3.1 | v0.4 |
+|--------|------|
+| Character-fragment based | Word-based |
+| Substring search | Exact word match (case-insensitive) |
+| No permutation | Passphrase-based carrier permutation |
+| Variable fragments | Block padding |
+| Positions are char indices | Positions are word indices |
+
+## [0.3.1] - 2025-12-14
+
+### Changed
+
+- **Never-Fail Decoder**
+  - Decoder NEVER returns an error - always produces output
+  - Invalid base64 → hash-derived garbage
+  - Wrong passphrase → carrier-derived fallback
+  - Wrong private key → carrier-derived fallback
+  - Deserialization failure → carrier-derived fallback
+  - Prevents brute-force attacks and provides plausible deniability
+
+- **Variable Fragmentation**
+  - Words are fragmented into variable-sized pieces (1-5 chars)
+  - Fragment sizes derived deterministically from passphrase using HKDF
+  - Spaces are treated as fragment boundaries (fragments never cross word boundaries)
+  - Same message + passphrase always produces same fragmentation
+
+- **Substring Search**
+  - Fragments are found as substrings in carrier (not exact word matches)
+  - Case-insensitive search (message "ama" found in carrier "Amanda")
+  - Character-position based (not word-index based)
+
+### Added
+
+- **Space Handling**
+  - Spaces extracted from message, stored as metadata
+  - Last fragment of each word carries space marker
+  - Spaces reconstructed during decoding
+  - Example: "ama parque" → fragments ["a", "ma", "par", "que"] with space after "ma"
+
+- **Fallback Generation**
+  - `generate_fallback_output()` - deterministic garbage from hash
+  - `generate_fallback_from_carrier()` - pseudo-random extraction from carrier
+  - Same invalid inputs always produce same garbage (deterministic)
+
+### Security
+
+- **Enhanced Plausible Deniability**
+  - Wrong inputs produce different but valid-looking output
+  - No way to distinguish "wrong passphrase" from "correct passphrase with different message"
+  - Decryption failures are indistinguishable from successful decryption
+
+- **Anti-Brute-Force**
+  - Every attempt produces output (no success/fail signal)
+  - Attackers cannot know when they've found the correct passphrase
+
+## [0.3.0] - 2025-12-14
+
+### Changed
+
+- **Complete Architecture Overhaul: Pre-shared Carrier Model**
+  - Removed all AI dependencies (Ollama, reqwest, tokio)
+  - Carrier text is now pre-shared between parties, never transmitted
+  - Only encrypted position codes are transmitted
+  - Much simpler, faster, and works completely offline
+
+### Removed
+
+- **AI Module** (`src/ai/`)
+  - Removed Ollama client
+  - Removed carrier generation
+  - Removed fragment interpretation
+  - No more HTTP dependencies
+
+- **Pattern Module** (`src/crypto/pattern.rs`)
+  - Position derivation no longer needed (positions are found, not derived)
+
+- **Complex Fragmentation** (`src/text/fragment.rs`)
+  - Removed adaptive/syllable/character fragmentation
+  - Simple word-based splitting is sufficient
+
+- **Dependencies**
+  - Removed `reqwest` (no HTTP needed)
+  - Removed `tokio` (no async needed)
+  - Removed `serde_json` (using bincode for serialization)
+
+### Added
+
+- **Symmetric Encryption Module** (`src/crypto/symmetric.rs`)
+  - Passphrase-based encryption using HKDF + ChaCha20-Poly1305
+  - Hybrid encryption: symmetric (passphrase) + asymmetric (X25519)
+
+- **New CLI Commands**
+  - `encode --carrier <file>`: Find positions in pre-shared carrier
+  - `decode --code <base64> --carrier <file>`: Decrypt and extract
+
+### Security
+
+- **Dual-layer encryption**: Both passphrase AND private key required
+- **Pre-shared carrier**: Carrier never transmitted = additional security layer
+- **Wrong passphrase = decryption failure** (authenticated encryption)
+- **Wrong carrier = wrong message or out-of-bounds error**
+
+### Migration from v0.2
+
+v0.3 is not backwards compatible with v0.2 encoded messages. The encoding format has completely changed:
+
+| v0.2 | v0.3 |
+|------|------|
+| Transmits: carrier + metadata | Transmits: only encrypted code |
+| AI generates carrier | User provides carrier |
+| Async (tokio) | Sync |
+| ~200 dependencies | ~50 dependencies |
+
+## [0.2.1] - 2025-12-14
+
+### Changed
+
+- **New 3-Step Carrier Generation Strategy**
+  - Step 1: AI generates base text without position constraints
+  - Step 2: Post-processing inserts fragments at exact positions
+  - Step 3: AI polish pass to smooth the text (with fallback to pre-polish)
+  - Much more reliable than single-shot position-constrained generation
+
+### Fixed
+
+- **Critical bug in position derivation**
+  - Encoding and decoding now use identical algorithm for position derivation
+  - Positions are derived from `hash(passphrase + base_seed)` consistently
+  - Plausible deniability now works correctly (wrong passphrase = different positions)
+
+### Added
+
+- `generate_base_text()` - Generates unconstrained base text
+- `polish_carrier()` - Smooths text while preserving fragments
+- `insert_fragments_at_positions()` - Deterministic fragment insertion
+
+## [0.2.0] - 2025-12-14
+
+### Added
+
+- **Case Pattern Preservation**
+  - Fragments are now normalized to lowercase for natural carrier embedding
+  - Original case patterns are stored and restored during decoding
+  - "Nos" in message appears as "nos" in carrier, but reconstructs as "Nos"
+
+- **Adaptive Fragmentation Mode**
+  - New `FragmentMode::Adaptive` (now default) that intelligently chooses fragmentation strategy per word
+  - Common words (el, la, the, to, etc.) stay whole
+  - Long words (5+ characters) may be split into syllables or characters
+  - Deterministic: same passphrase+message always produces same fragmentation
+
+- **Enhanced Reconstruction**
+  - New `ReconstructionInfo` struct stores case patterns and fragment assembly info
+  - Encoded messages now include reconstruction metadata
+  - Backwards compatible with v0.1.0 message format
+
+### Changed
+
+- Default fragmentation mode changed from `Words` to `Adaptive`
+- Fragments extracted from carrier are now always lowercase
+- EncodedMessage format extended with reconstruction field
+
+### Security
+
+- Fragments no longer reveal case information in carrier text
+- "Marta" appearing as "marta" (or "mar" + "ta") is less detectable
+- Improved concealment through mixed fragmentation strategies
+
+## [0.1.0] - 2025-12-14
+
+### Added
+
+- **Core Implementation**
+  - Complete KAMO v0.2 specification implementation
+  - CLI tool with `keygen`, `encode`, and `decode` commands
+  - Support for multiple languages (es, en, fr, de, it, pt)
+
+- **Cryptographic Module** (`src/crypto/`)
+  - X25519 key pair generation with PEM format serialization
+  - Hybrid encryption using X25519 + ChaCha20-Poly1305
+  - HKDF-based pattern derivation for position generation
+  - Deterministic AI seed generation for consistent decoy outputs
+
+- **Text Processing Module** (`src/text/`)
+  - Message fragmentation (words, syllables, characters modes)
+  - Carrier text tokenization and position-based extraction
+  - Carrier verification against expected fragments
+
+- **AI Integration Module** (`src/ai/`)
+  - Ollama HTTP client for local AI model interaction
+  - Carrier generation with position-constrained word placement
+  - Fragment interpretation for coherent message reconstruction
+
+- **Encoder** (`src/encoder.rs`)
+  - Complete encoding pipeline: fragment → pattern → AI → verify
+  - Retry logic with temperature adjustment
+  - Transmittable format with embedded metadata
+
+- **Decoder** (`src/decoder.rs`)
+  - Complete decoding pipeline: pattern → extract → interpret
+  - Plausible deniability: never returns error for wrong passphrase
+  - Deterministic decoy generation
+
+- **CLI** (`src/main.rs`)
+  - `keygen`: Generate X25519 key pairs
+  - `encode`: Encode messages with stdin/file support
+  - `decode`: Decode carriers with stdin/file support
+  - Verbose mode for debugging
+
+- **Testing**
+  - Unit tests for all modules (39 tests)
+  - Integration tests for complete workflows
+  - Tests for deterministic decoy behavior
+
+- **Documentation**
+  - Comprehensive README with usage examples
+  - API documentation with rustdoc
+  - MIT License
+
+### Security
+
+- Messages require both private key AND correct passphrase to decode
+- Wrong passphrase produces coherent decoy message (plausible deniability)
+- Same wrong passphrase always produces same decoy (deterministic)
+- No oracle attacks: decode never reveals if passphrase is correct

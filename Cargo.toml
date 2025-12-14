@@ -1,0 +1,42 @@
+[package]
+name = "kamo"
+version = "0.4.1"
+edition = "2021"
+description = "Four-factor steganography with substring fragments, distributed selection, and block padding"
+license = "MIT"
+authors = ["KAMO Contributors"]
+repository = "https://github.com/kamo-project/kamo"
+keywords = ["steganography", "cryptography", "privacy", "security"]
+categories = ["command-line-utilities", "cryptography"]
+
+[dependencies]
+# Crypto
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+base64 = "0.22"
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[[bin]]
+name = "kamo"
+path = "src/main.rs"
+
+[lib]
+name = "kamo"
+path = "src/lib.rs"
