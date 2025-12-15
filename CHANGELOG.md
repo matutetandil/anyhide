@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.2] - 2025-12-15
 
+### Changed
+
+- **Project Renamed to Anyhide**
+  - Package name changed from `kamo` to `anyhide`
+  - Binary renamed to `anyhide`
+  - PEM headers changed to `ANYHIDE PUBLIC/PRIVATE KEY`
+  - All documentation updated
+
 ### Added
 
 - **Inline QR Code Generation**
   - New `--qr <path>` option in `encode` command
-  - Generate KAMO code and QR in one step
+  - Generate Anyhide code and QR in one step
   - `--qr-format` option for png/svg/ascii output
-  - Example: `kamo encode -c carrier.txt -m "msg" -p "pass" -k bob.pub --qr code.png`
+  - Example: `anyhide encode -c carrier.txt -m "msg" -p "pass" -k bob.pub --qr code.png`
 
 ## [0.5.1] - 2025-12-15
 

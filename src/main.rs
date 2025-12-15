@@ -1,27 +1,27 @@
-//! KAMO - Key Asymmetric Message Obfuscation
+//! Anyhide - Hide anything in anything
 //!
 //! A CLI tool for advanced steganography with hybrid encryption.
-//! Uses pre-shared carriers (any file) - only KAMO codes are transmitted.
+//! Uses pre-shared carriers (any file) - only encrypted codes are transmitted.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use kamo::crypto::{
+use anyhide::crypto::{
     decrypt_multi, encrypt_multi, load_public_key, load_secret_key, KeyPair, MultiRecipientData,
 };
-use kamo::qr::{generate_qr_to_file, qr_capacity_info, read_qr_from_file, QrConfig, QrFormat};
-use kamo::{
+use anyhide::qr::{generate_qr_to_file, qr_capacity_info, read_qr_from_file, QrConfig, QrFormat};
+use anyhide::{
     decode_with_carrier_config, encode_with_carrier_config, Carrier, DecoderConfig, EncoderConfig,
 };
 
-/// KAMO - Key Asymmetric Message Obfuscation
+/// Anyhide - Hide anything in anything
 ///
 /// Advanced steganography with compression, forward secrecy, and universal carrier support.
-/// Use ANY file as a pre-shared carrier - only encrypted KAMO codes are transmitted.
+/// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
-#[command(name = "kamo")]
+#[command(name = "anyhide")]
 #[command(version = "0.5.2")]
 #[command(about = "Advanced steganography with compression, forward secrecy, and multi-carrier support")]
 #[command(long_about = None)]
@@ -35,7 +35,7 @@ enum Commands {
     /// Generate a new key pair
     Keygen {
         /// Output path for keys (creates .pub and .key files)
-        #[arg(short, long, default_value = "kamo")]
+        #[arg(short, long, default_value = "anyhide")]
         output: PathBuf,
     },
 
@@ -45,8 +45,8 @@ enum Commands {
     /// - Text files (.txt, .md, .csv, .json, .xml, .html) - substring matching
     /// - Any other file (images, audio, video, PDFs, executables, etc.) - byte-sequence matching
     ///
-    /// Output is always a KAMO code (base64) - the carrier is NEVER modified.
-    /// The KAMO code does NOT reveal whether the hidden data is text or binary.
+    /// Output is always an encrypted code (base64) - the carrier is NEVER modified.
+    /// The code does NOT reveal whether the hidden data is text or binary.
     Encode {
         /// Path to carrier file (any file - text uses substring matching, others use byte matching)
         #[arg(short, long)]
@@ -152,10 +152,10 @@ enum Commands {
         key: PathBuf,
     },
 
-    /// Generate a QR code from a KAMO code (uses Base45 for optimal capacity)
+    /// Generate a QR code from an Anyhide code (uses Base45 for optimal capacity)
     #[command(name = "qr-generate")]
     QrGenerate {
-        /// KAMO code (base64 string) - reads from stdin if not provided
+        /// Anyhide code (base64 string) - reads from stdin if not provided
         #[arg(short, long)]
         code: Option<String>,
 
@@ -168,7 +168,7 @@ enum Commands {
         format: String,
     },
 
-    /// Read a QR code and extract the KAMO code
+    /// Read a QR code and extract the Anyhide code
     #[command(name = "qr-read")]
     QrRead {
         /// Path to image containing QR code
@@ -187,7 +187,7 @@ enum Commands {
         #[arg(short, long)]
         size: Option<usize>,
 
-        /// KAMO code to analyze
+        /// Anyhide code to analyze
         #[arg(short, long)]
         code: Option<String>,
     },
@@ -309,7 +309,7 @@ fn encode_cmd(
             eprintln!("Encoding binary file: {} ({} bytes)", file_path.display(), data.len());
         }
 
-        kamo::encode_bytes_with_carrier_config(&carrier, &data, passphrase, &public_key, &config)
+        anyhide::encode_bytes_with_carrier_config(&carrier, &data, passphrase, &public_key, &config)
             .context("Failed to encode file")?
     } else {
         // Text message encoding
@@ -418,7 +418,7 @@ fn decode_cmd(
 
     // If output file is specified, decode as binary
     if let Some(output_path) = output {
-        let decoded = kamo::decode_bytes_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
+        let decoded = anyhide::decode_bytes_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
 
         match std::fs::write(output_path, &decoded.data) {
             Ok(_) => {
@@ -536,7 +536,7 @@ fn multi_decrypt(input: &str, passphrase: &str, key_path: &PathBuf) -> Result<()
     Ok(())
 }
 
-/// Generates a QR code from a KAMO code.
+/// Generates a QR code from an Anyhide code.
 fn qr_generate(code: Option<String>, output: &PathBuf, format: &str) -> Result<()> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -544,7 +544,7 @@ fn qr_generate(code: Option<String>, output: &PathBuf, format: &str) -> Result<(
     let code_str = match code {
         Some(c) => c,
         None => {
-            eprintln!("Reading KAMO code from stdin (Ctrl+D to finish):");
+            eprintln!("Reading Anyhide code from stdin (Ctrl+D to finish):");
             let mut buffer = String::new();
             io::stdin()
                 .read_to_string(&mut buffer)
@@ -560,7 +560,7 @@ fn qr_generate(code: Option<String>, output: &PathBuf, format: &str) -> Result<(
     // Decode base64 to get raw bytes
     let data = BASE64
         .decode(&code_str)
-        .context("Failed to decode base64 KAMO code")?;
+        .context("Failed to decode base64 Anyhide code")?;
 
     // Determine output format
     let qr_format = match format.to_lowercase().as_str() {
@@ -591,7 +591,7 @@ fn qr_generate(code: Option<String>, output: &PathBuf, format: &str) -> Result<(
     Ok(())
 }
 
-/// Reads a QR code and extracts the KAMO code.
+/// Reads a QR code and extracts the Anyhide code.
 fn qr_read(input: &PathBuf, output: Option<&PathBuf>) -> Result<()> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -603,10 +603,10 @@ fn qr_read(input: &PathBuf, output: Option<&PathBuf>) -> Result<()> {
         // Write raw bytes to file
         std::fs::write(output_path, &data)
             .with_context(|| format!("Failed to write to {}", output_path.display()))?;
-        println!("KAMO code written to: {}", output_path.display());
+        println!("Anyhide code written to: {}", output_path.display());
         println!("  Size: {} bytes", data.len());
     } else {
-        // Output as base64 (standard KAMO code format)
+        // Output as base64 (standard Anyhide code format)
         let base64_code = BASE64.encode(&data);
         println!("{}", base64_code);
     }

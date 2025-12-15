@@ -1,4 +1,4 @@
-//! Key generation and management for KAMO.
+//! Key generation and management for Anyhide.
 //!
 //! This module handles X25519 key pair generation and PEM format serialization.
 
@@ -9,13 +9,13 @@ use std::path::Path;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-/// PEM header for KAMO public keys.
-const PUBLIC_KEY_HEADER: &str = "-----BEGIN KAMO PUBLIC KEY-----";
-const PUBLIC_KEY_FOOTER: &str = "-----END KAMO PUBLIC KEY-----";
+/// PEM header for Anyhide public keys.
+const PUBLIC_KEY_HEADER: &str = "-----BEGIN ANYHIDE PUBLIC KEY-----";
+const PUBLIC_KEY_FOOTER: &str = "-----END ANYHIDE PUBLIC KEY-----";
 
-/// PEM header for KAMO private keys.
-const PRIVATE_KEY_HEADER: &str = "-----BEGIN KAMO PRIVATE KEY-----";
-const PRIVATE_KEY_FOOTER: &str = "-----END KAMO PRIVATE KEY-----";
+/// PEM header for Anyhide private keys.
+const PRIVATE_KEY_HEADER: &str = "-----BEGIN ANYHIDE PRIVATE KEY-----";
+const PRIVATE_KEY_FOOTER: &str = "-----END ANYHIDE PRIVATE KEY-----";
 
 /// Errors that can occur during key operations.
 #[derive(Error, Debug)]
@@ -33,7 +33,7 @@ pub enum KeyError {
     IoError(#[from] std::io::Error),
 }
 
-/// A KAMO key pair containing both public and private keys.
+/// An Anyhide key pair containing both public and private keys.
 #[derive(Clone)]
 pub struct KeyPair {
     secret: StaticSecret,

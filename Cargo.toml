@@ -1,11 +1,11 @@
 [package]
-name = "kamo"
+name = "anyhide"
 version = "0.5.2"
 edition = "2021"
 description = "Hide any data in any file - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"
-authors = ["KAMO Contributors"]
-repository = "https://github.com/matutetandil/kamo"
+authors = ["Anyhide Contributors"]
+repository = "https://github.com/matutetandil/anyhide"
 keywords = ["steganography", "cryptography", "privacy", "security", "encryption", "hide-files"]
 categories = ["command-line-utilities", "cryptography"]
 
@@ -45,9 +45,9 @@ thiserror = "1.0"
 tempfile = "3.0"
 
 [[bin]]
-name = "kamo"
+name = "anyhide"
 path = "src/main.rs"
 
 [lib]
-name = "kamo"
+name = "anyhide"
 path = "src/lib.rs"

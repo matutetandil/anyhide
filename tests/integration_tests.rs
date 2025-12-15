@@ -1,16 +1,16 @@
-//! Integration tests for KAMO v0.4.1
+//! Integration tests for Anyhide
 //!
 //! Note: decode() NEVER fails - it always returns something.
 //! Wrong inputs produce garbage, not errors.
 //!
-//! v0.4.1 Features:
+//! Features:
 //! - Variable fragmentation (passphrase-based sizes)
 //! - Substring matching (fragments found as substrings)
 //! - Distributed selection (positions spread across occurrences)
 //! - Block padding (message length hidden)
 
-use kamo::crypto::KeyPair;
-use kamo::{decode, encode};
+use anyhide::crypto::KeyPair;
+use anyhide::{decode, encode};
 
 /// Test basic encode/decode roundtrip
 #[test]
@@ -371,7 +371,7 @@ fn test_roundtrip_v5() {
 // Binary Message Tests
 // ============================================================================
 
-use kamo::{
+use anyhide::{
     decode_bytes_with_carrier, encode_bytes_with_carrier, Carrier,
 };
 

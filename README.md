@@ -1,15 +1,15 @@
-# KAMO - Steganography Tool for Hiding Any Data in Any File
+# Anyhide - Steganography Tool for Hiding Any Data in Any File
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 
-**Hide anything inside anything.** KAMO is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
+**Hide anything inside anything.** Anyhide is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
 
-## Why KAMO?
+## Why Anyhide?
 
-Traditional steganography modifies the carrier file and transmits it. KAMO is different:
+Traditional steganography modifies the carrier file and transmits it. Anyhide is different:
 
-| Traditional Steganography | KAMO |
+| Traditional Steganography | Anyhide |
 |---------------------------|------|
 | Modifies the carrier file | Never touches the carrier |
 | Transmits the modified file | Transmits only a short code |
@@ -24,7 +24,7 @@ Traditional steganography modifies the carrier file and transmits it. KAMO is di
 
 ## Overview
 
-KAMO uses a **pre-shared carrier** model:
+Anyhide uses a **pre-shared carrier** model:
 
 1. Both parties have the same file (ANY file: image, video, PDF, executable, text, etc.)
 2. Sender hides data (text OR binary files) by finding byte patterns in the carrier
@@ -37,7 +37,7 @@ KAMO uses a **pre-shared carrier** model:
 │                                                             │
 │  carrier.mp4 ──┐                      ┌── carrier.mp4       │
 │                │                      │   (same file)       │
-│  secret.zip ───┼──► KAMO CODE ────────┼──► secret.zip       │
+│  secret.zip ───┼──► ANYHIDE CODE ────────┼──► secret.zip       │
 │                │   (only this         │                     │
 │  passphrase ───┘    is sent)          └── passphrase        │
 │                                                             │
@@ -50,7 +50,7 @@ KAMO uses a **pre-shared carrier** model:
 ### Hide Anything in Anything
 - **Any carrier**: text, images, audio, video, PDFs, executables, archives, databases
 - **Any payload**: text messages, binary files, documents, compressed archives
-- **Indistinguishable**: KAMO code reveals nothing about what's hidden (text vs 10MB file)
+- **Indistinguishable**: Anyhide code reveals nothing about what's hidden (text vs 10MB file)
 
 ### Military-Grade Security
 - **Dual-layer encryption**: Symmetric (ChaCha20-Poly1305) + Asymmetric (X25519)
@@ -132,12 +132,12 @@ KAMO uses a **pre-shared carrier** model:
 ### Build from Source
 
 ```bash
-git clone https://github.com/matutetandil/kamo.git
-cd kamo
+git clone https://github.com/matutetandil/anyhide.git
+cd anyhide
 cargo build --release
 ```
 
-The binary will be available at `target/release/kamo`.
+The binary will be available at `target/release/anyhide`.
 
 ## Usage
 
@@ -145,7 +145,7 @@ The binary will be available at `target/release/kamo`.
 
 ```bash
 # Generate keys (creates mykeys.pub and mykeys.key)
-kamo keygen -o mykeys
+anyhide keygen -o mykeys
 
 # Share mykeys.pub with people who want to send you messages
 # Keep mykeys.key secret and secure
@@ -158,7 +158,7 @@ kamo keygen -o mykeys
 echo "Yesterday my aunt Martha called me on the phone to tell me something" > carrier.txt
 
 # Encode a message
-kamo encode \
+anyhide encode \
   --carrier carrier.txt \
   --message "Martha called" \
   --passphrase "secret123" \
@@ -171,7 +171,7 @@ kamo encode \
 
 ```bash
 # Decode using the same carrier
-kamo decode \
+anyhide decode \
   --code "AwNhYmNkZWZn..." \
   --carrier carrier.txt \
   --passphrase "secret123" \
@@ -183,10 +183,10 @@ kamo decode \
 ### Available Options
 
 ```
-kamo keygen
-  -o, --output <PATH>    Output path for keys (default: kamo)
+anyhide keygen
+  -o, --output <PATH>    Output path for keys (default: anyhide)
 
-kamo encode
+anyhide encode
   -c, --carrier <PATH>   Path to carrier file (any file type)
   -m, --message <MSG>    Text message to encode (mutually exclusive with --file)
   -f, --file <PATH>      Binary file to encode (mutually exclusive with --message)
@@ -196,7 +196,7 @@ kamo encode
   --qr <PATH>            Generate QR code and save to file (in addition to printing code)
   --qr-format <FMT>      QR format: png (default), svg, or ascii
 
-kamo decode
+anyhide decode
   --code <CODE>          The encrypted code to decode
   -c, --carrier <PATH>   Path to carrier file (same as encoding)
   -p, --passphrase <PASS> Passphrase for decryption
@@ -204,29 +204,29 @@ kamo decode
   -o, --output <PATH>    Output file for decoded data (required for binary)
   -v, --verbose          Show positions and fragments
 
-kamo multi-encrypt
+anyhide multi-encrypt
   -m, --message <MSG>    Message to encrypt (or reads from stdin)
   -p, --passphrase <PASS> Passphrase for encryption
   -k, --keys <PATHS>...  Paths to recipients' public keys
   -o, --output <PATH>    Output file (prints base64 if not specified)
 
-kamo multi-decrypt
+anyhide multi-decrypt
   -i, --input <INPUT>    Encrypted data (base64 string or file path)
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
 
-kamo qr-generate
-  -c, --code <CODE>      KAMO code (base64) - reads from stdin if not provided
+anyhide qr-generate
+  -c, --code <CODE>      Anyhide code (base64) - reads from stdin if not provided
   -o, --output <PATH>    Output file path (PNG, SVG, or TXT)
   -f, --format <FMT>     Output format: png (default), svg, or ascii
 
-kamo qr-read
+anyhide qr-read
   -i, --input <PATH>     Path to image containing QR code
   -o, --output <PATH>    Output raw bytes to file (base64 to stdout if not specified)
 
-kamo qr-info
+anyhide qr-info
   -s, --size <BYTES>     Data size in bytes
-  -c, --code <CODE>      Or provide KAMO code to analyze
+  -c, --code <CODE>      Or provide Anyhide code to analyze
 ```
 
 ## Security Properties
@@ -251,16 +251,16 @@ Both Alice and Bob agree to use the first paragraph of "Moby Dick" as their carr
 # little or no money in my purse, and nothing particular to interest me..."
 
 # Alice encodes "call me"
-kamo encode -c carrier.txt -m "call me" -p "melville" -k bob.pub
+anyhide encode -c carrier.txt -m "call me" -p "melville" -k bob.pub
 # Output: AxB2c3...
 
 # Bob decodes
-kamo decode --code "AxB2c3..." -c carrier.txt -p "melville" -k bob.key
+anyhide decode --code "AxB2c3..." -c carrier.txt -p "melville" -k bob.key
 # Output: call me
 ```
 
 Anyone intercepting "AxB2c3..." has no idea:
-- That it's a KAMO code
+- That it's a Anyhide code
 - What carrier was used
 - What the message is
 
@@ -278,11 +278,11 @@ Use ANY file as a pre-shared carrier (file is never modified):
 # - Any other file!
 
 # Alice encodes using a shared PDF as carrier
-kamo encode -c shared_document.pdf -m "secret message" -p "passphrase" -k bob.pub
-# Output: AxB2c3F4... (KAMO code - the PDF is NOT modified)
+anyhide encode -c shared_document.pdf -m "secret message" -p "passphrase" -k bob.pub
+# Output: AxB2c3F4... (Anyhide code - the PDF is NOT modified)
 
 # Bob decodes using the exact same PDF
-kamo decode --code "AxB2c3F4..." -c shared_document.pdf -p "passphrase" -k bob.key
+anyhide decode --code "AxB2c3F4..." -c shared_document.pdf -p "passphrase" -k bob.key
 # Output: secret message
 ```
 
@@ -293,10 +293,10 @@ the raw bytes of the file. Larger files = more byte diversity = better success r
 
 ```bash
 # Both parties have the same photo
-kamo encode -c vacation_photo.jpg -m "meeting at 5pm" -p "secret" -k bob.pub
-# Output: BxY4z5W6... (KAMO code)
+anyhide encode -c vacation_photo.jpg -m "meeting at 5pm" -p "secret" -k bob.pub
+# Output: BxY4z5W6... (Anyhide code)
 
-kamo decode --code "BxY4z5W6..." -c vacation_photo.jpg -p "secret" -k bob.key
+anyhide decode --code "BxY4z5W6..." -c vacation_photo.jpg -p "secret" -k bob.key
 # Output: meeting at 5pm
 ```
 
@@ -304,33 +304,33 @@ kamo decode --code "BxY4z5W6..." -c vacation_photo.jpg -p "secret" -k bob.key
 
 ```bash
 # Video files work great due to their size
-kamo encode -c shared_video.mp4 -m "coordinates: 40.7128, -74.0060" -p "pass" -k bob.pub
+anyhide encode -c shared_video.mp4 -m "coordinates: 40.7128, -74.0060" -p "pass" -k bob.pub
 
 # Audio files
-kamo encode -c song.wav -m "the eagle has landed" -p "pass" -k bob.pub
+anyhide encode -c song.wav -m "the eagle has landed" -p "pass" -k bob.pub
 ```
 
 ## Example: Hide Binary Files
 
-Hide ANY file (zip, image, executable, etc.) inside a carrier. The KAMO code
+Hide ANY file (zip, image, executable, etc.) inside a carrier. The Anyhide code
 reveals nothing about whether the content is text or binary.
 
 ```bash
 # Alice hides a secret.zip inside a shared video
-kamo encode -c shared_video.mp4 --file secret.zip -p "pass" -k bob.pub
-# Output: BxY4z5W6... (KAMO code - indistinguishable from text encoding)
+anyhide encode -c shared_video.mp4 --file secret.zip -p "pass" -k bob.pub
+# Output: BxY4z5W6... (Anyhide code - indistinguishable from text encoding)
 
 # Bob extracts the file using -o to write raw bytes
-kamo decode --code "BxY4z5W6..." -c shared_video.mp4 -p "pass" -k bob.key -o secret.zip
+anyhide decode --code "BxY4z5W6..." -c shared_video.mp4 -p "pass" -k bob.key -o secret.zip
 # Output: Decoded 15234 bytes to secret.zip
 
 # Works with any binary data:
-kamo encode -c carrier.bin --file confidential.pdf -p "pass" -k bob.pub
-kamo encode -c movie.mp4 --file keys.tar.gz -p "pass" -k bob.pub
-kamo encode -c image.png --file database.sqlite -p "pass" -k bob.pub
+anyhide encode -c carrier.bin --file confidential.pdf -p "pass" -k bob.pub
+anyhide encode -c movie.mp4 --file keys.tar.gz -p "pass" -k bob.pub
+anyhide encode -c image.png --file database.sqlite -p "pass" -k bob.pub
 ```
 
-**Security Note:** The KAMO code format is identical for text and binary messages.
+**Security Note:** The Anyhide code format is identical for text and binary messages.
 An attacker cannot determine if the hidden content is "hello world" or a 10MB file
 just by looking at the code.
 
@@ -340,35 +340,35 @@ Encrypt a message for multiple recipients at once:
 
 ```bash
 # Encrypt for Alice, Bob, and Charlie
-kamo multi-encrypt -m "Team meeting at 5pm" -p "shared_secret" \
+anyhide multi-encrypt -m "Team meeting at 5pm" -p "shared_secret" \
   -k alice.pub -k bob.pub -k charlie.pub
 # Output: AQMAAABhYmNkZWZn... (base64 encrypted data)
 
 # Each recipient decrypts with their own private key
-kamo multi-decrypt -i "AQMAAABhYmNkZWZn..." -p "shared_secret" -k alice.key
+anyhide multi-decrypt -i "AQMAAABhYmNkZWZn..." -p "shared_secret" -k alice.key
 # Output: Team meeting at 5pm
 ```
 
 ## Example: QR Code Generation
 
-Share KAMO codes via QR code for easy mobile scanning:
+Share Anyhide codes via QR code for easy mobile scanning:
 
 ```bash
-# Generate KAMO code + QR in one step (recommended)
-kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub --qr code.png
-# Output: AxB2c3F4... (KAMO code)
+# Generate Anyhide code + QR in one step (recommended)
+anyhide encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub --qr code.png
+# Output: AxB2c3F4... (Anyhide code)
 #         QR code saved: code.png
 
 # Or generate QR separately from existing code
-CODE=$(kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub)
-kamo qr-generate -c "$CODE" -o kamo_code.png
+CODE=$(anyhide encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub)
+anyhide qr-generate -c "$CODE" -o anyhide_code.png
 
-# Read QR code back to KAMO code
-kamo qr-read -i kamo_code.png
-# Output: [base64 KAMO code]
+# Read QR code back to Anyhide code
+anyhide qr-read -i anyhide_code.png
+# Output: [base64 Anyhide code]
 
 # Check if your data fits in a QR code
-kamo qr-info --size 500
+anyhide qr-info --size 500
 # Output: Fits in QR version 17, ~750 Base45 chars
 ```
 
@@ -377,7 +377,7 @@ kamo qr-info --size 500
 ## Project Structure
 
 ```
-kamo/
+anyhide/
 ├── src/
 │   ├── main.rs              # CLI with clap
 │   ├── lib.rs               # Public re-exports, constants
@@ -419,13 +419,13 @@ kamo/
 ### Key Format
 
 ```
------BEGIN KAMO PUBLIC KEY-----
+-----BEGIN ANYHIDE PUBLIC KEY-----
 [base64 of 32 bytes X25519 public key]
------END KAMO PUBLIC KEY-----
+-----END ANYHIDE PUBLIC KEY-----
 
------BEGIN KAMO PRIVATE KEY-----
+-----BEGIN ANYHIDE PRIVATE KEY-----
 [base64 of 32 bytes X25519 secret key]
------END KAMO PRIVATE KEY-----
+-----END ANYHIDE PRIVATE KEY-----
 ```
 
 ## Testing
@@ -456,7 +456,7 @@ All code follows SOLID principles:
 
 ## Disclaimer
 
-**KAMO is provided for educational and legitimate privacy purposes only.**
+**Anyhide is provided for educational and legitimate privacy purposes only.**
 
 This software is a tool, and like any tool, it can be used for good or bad purposes. The authors and contributors:
 
@@ -466,7 +466,7 @@ This software is a tool, and like any tool, it can be used for good or bad purpo
 
 **You are solely responsible for ensuring your use complies with all applicable laws and regulations in your jurisdiction.** Legitimate uses include protecting personal privacy, secure communication, research, and educational purposes.
 
-By using KAMO, you agree that the authors bear no liability for any misuse or damages arising from the use of this software.
+By using Anyhide, you agree that the authors bear no liability for any misuse or damages arising from the use of this software.
 
 ## License
 

@@ -1,11 +1,11 @@
-//! # KAMO - Key Asymmetric Message Obfuscation
+//! # Anyhide - Hide anything in anything
 //!
-//! KAMO is a steganography tool that hides messages within pre-shared carriers
-//! (text, images, or audio).
+//! Anyhide is a steganography tool that hides messages within pre-shared carriers
+//! (text, images, audio, or any file).
 //!
 //! ## Overview
 //!
-//! KAMO v0.5 uses a pre-shared carrier approach with enhanced security:
+//! Anyhide uses a pre-shared carrier approach with enhanced security:
 //! - Both parties agree on a carrier beforehand (text, image, or audio file)
 //! - Message is **fragmented** into variable-sized pieces based on passphrase
 //! - Fragments are found as **substrings** (text) or **byte sequences** (binary)
@@ -27,8 +27,8 @@
 //! ## Example Usage
 //!
 //! ```rust
-//! use kamo::crypto::KeyPair;
-//! use kamo::{encode, decode};
+//! use anyhide::crypto::KeyPair;
+//! use anyhide::{encode, decode};
 //!
 //! // Both parties have the same carrier text
 //! let carrier = "Amanda fue al parque con su hermano ayer por la tarde";

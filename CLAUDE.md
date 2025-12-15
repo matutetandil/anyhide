@@ -2,9 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project: KAMO
+## Project: Anyhide
 
-This is a new project. Architecture and build commands will be documented as the project develops.
+Anyhide is a steganography tool that hides any data within any file using hybrid encryption with forward secrecy and plausible deniability.
+
+### Build Commands
+
+```bash
+cargo build           # Debug build
+cargo build --release # Release build
+cargo test            # Run all tests
+```
 
 ## Development Standards
 
