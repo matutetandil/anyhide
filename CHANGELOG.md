@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `audio-hide` / `audio-extract` - Hide/extract data in audio
   - `multi-encrypt` / `multi-decrypt` - Multi-recipient encryption
   - `capacity` - Show image/audio capacity for hiding data
+  - `qr-generate` / `qr-read` - Generate and read QR codes
+  - `qr-info` - Show QR code capacity analysis
+
+- **QR Code Support** (`src/qr/`)
+  - Base45 encoding for optimal QR capacity (~45% more than Base64)
+  - Generate QR codes as PNG, SVG, or ASCII art
+  - Read QR codes from images
+  - Capacity analysis to check if data fits in QR
 
 ### Changed
 

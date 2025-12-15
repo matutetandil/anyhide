@@ -20,6 +20,7 @@ KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 ### Key Features
 
 - **Multi-Carrier Support**: Hide in text, images (PNG/BMP), or audio (WAV)
+- **QR Code Support**: Generate/read QR codes with Base45 encoding for optimal capacity
 - **Forward Secrecy**: Ephemeral keys - compromised key doesn't expose past messages
 - **Message Compression**: DEFLATE compression allows longer messages
 - **Multi-Recipient**: Encrypt once for multiple recipients efficiently
@@ -198,6 +199,19 @@ kamo multi-decrypt
 
 kamo capacity
   -f, --file <PATH>      Path to image or audio file
+
+kamo qr-generate
+  -c, --code <CODE>      KAMO code (base64) - reads from stdin if not provided
+  -o, --output <PATH>    Output file path (PNG, SVG, or TXT)
+  -f, --format <FMT>     Output format: png (default), svg, or ascii
+
+kamo qr-read
+  -i, --input <PATH>     Path to image containing QR code
+  -o, --output <PATH>    Output raw bytes to file (base64 to stdout if not specified)
+
+kamo qr-info
+  -s, --size <BYTES>     Data size in bytes
+  -c, --code <CODE>      Or provide KAMO code to analyze
 ```
 
 ## Security Properties
@@ -284,6 +298,29 @@ kamo multi-decrypt -i "AQMAAABhYmNkZWZn..." -p "shared_secret" -k alice.key
 # Output: Team meeting at 5pm
 ```
 
+## Example: QR Code Generation
+
+Share KAMO codes via QR code for easy mobile scanning:
+
+```bash
+# Generate a KAMO code
+CODE=$(kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub)
+
+# Convert to QR code (uses Base45 for optimal capacity)
+kamo qr-generate -c "$CODE" -o kamo_code.png
+# Output: QR code generated (Version 15, ~480 chars)
+
+# Read QR code back to KAMO code
+kamo qr-read -i kamo_code.png
+# Output: [base64 KAMO code]
+
+# Check if your data fits in a QR code
+kamo qr-info --size 500
+# Output: Fits in QR version 17, ~750 Base45 chars
+```
+
+**Why Base45?** Standard QR codes have an alphanumeric mode that's more efficient than byte mode. Base45 uses only alphanumeric characters, providing ~45% more capacity than Base64 for QR codes.
+
 ## Project Structure
 
 ```
@@ -309,6 +346,10 @@ kamo/
 │   │   ├── mod.rs
 │   │   ├── image.rs         # LSB steganography for PNG/BMP
 │   │   └── audio.rs         # LSB steganography for WAV
+│   ├── qr/
+│   │   ├── mod.rs           # Base45 encoding for QR codes
+│   │   ├── generator.rs     # QR code generation (PNG/SVG/ASCII)
+│   │   └── reader.rs        # QR code reading and decoding
 │   ├── encoder.rs           # Permute → find → pad → encrypt
 │   └── decoder.rs           # Decrypt → permute → extract (never fails)
 ├── tests/

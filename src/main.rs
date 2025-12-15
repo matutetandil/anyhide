@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use kamo::crypto::{
     decrypt_multi, encrypt_multi, load_public_key, load_secret_key, KeyPair, MultiRecipientData,
 };
+use kamo::qr::{generate_qr_to_file, qr_capacity_info, read_qr_from_file, QrConfig, QrFormat};
 use kamo::stego::{AudioStego, ImageStego};
 use kamo::{decode_with_config, encode_with_config, DecoderConfig, EncoderConfig};
 
@@ -207,6 +208,46 @@ enum Commands {
         #[arg(short, long)]
         file: PathBuf,
     },
+
+    /// Generate a QR code from a KAMO code (uses Base45 for optimal capacity)
+    #[command(name = "qr-generate")]
+    QrGenerate {
+        /// KAMO code (base64 string) - reads from stdin if not provided
+        #[arg(short, long)]
+        code: Option<String>,
+
+        /// Output file path (PNG, SVG, or TXT for ASCII)
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Output format: png (default), svg, or ascii
+        #[arg(short, long, default_value = "png")]
+        format: String,
+    },
+
+    /// Read a QR code and extract the KAMO code
+    #[command(name = "qr-read")]
+    QrRead {
+        /// Path to image containing QR code
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output as base64 (default) or raw bytes to file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Show QR code capacity info for a given data size
+    #[command(name = "qr-info")]
+    QrInfo {
+        /// Data size in bytes (or provide --code to calculate from actual data)
+        #[arg(short, long)]
+        size: Option<usize>,
+
+        /// KAMO code to analyze
+        #[arg(short, long)]
+        code: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -273,6 +314,16 @@ fn main() -> Result<()> {
         } => multi_decrypt(&input, &passphrase, &key)?,
 
         Commands::Capacity { file } => show_capacity(&file)?,
+
+        Commands::QrGenerate {
+            code,
+            output,
+            format,
+        } => qr_generate(code, &output, &format)?,
+
+        Commands::QrRead { input, output } => qr_read(&input, output.as_ref())?,
+
+        Commands::QrInfo { size, code } => qr_info(size, code.as_ref())?,
     }
 
     Ok(())
@@ -672,6 +723,138 @@ fn show_capacity(file: &PathBuf) -> Result<()> {
             );
         }
     }
+
+    Ok(())
+}
+
+/// Generates a QR code from a KAMO code.
+fn qr_generate(code: Option<String>, output: &PathBuf, format: &str) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    // Get the code from argument or stdin
+    let code_str = match code {
+        Some(c) => c,
+        None => {
+            eprintln!("Reading KAMO code from stdin (Ctrl+D to finish):");
+            let mut buffer = String::new();
+            io::stdin()
+                .read_to_string(&mut buffer)
+                .context("Failed to read code from stdin")?;
+            buffer.trim().to_string()
+        }
+    };
+
+    if code_str.is_empty() {
+        anyhow::bail!("Code cannot be empty");
+    }
+
+    // Decode base64 to get raw bytes
+    let data = BASE64
+        .decode(&code_str)
+        .context("Failed to decode base64 KAMO code")?;
+
+    // Determine output format
+    let qr_format = match format.to_lowercase().as_str() {
+        "png" => QrFormat::Png,
+        "svg" => QrFormat::Svg,
+        "ascii" | "txt" => QrFormat::Ascii,
+        _ => anyhow::bail!("Unknown format: {}. Use: png, svg, or ascii", format),
+    };
+
+    // Generate QR code
+    let config = QrConfig {
+        format: qr_format,
+        ..Default::default()
+    };
+
+    generate_qr_to_file(&data, output, &config)
+        .context("Failed to generate QR code")?;
+
+    // Show capacity info
+    let info = qr_capacity_info(data.len());
+
+    println!("QR code generated: {}", output.display());
+    println!("  Original size: {} bytes", data.len());
+    println!("  Base45 encoded: ~{} chars", info.base45_chars);
+    println!("  QR version: {}", info.qr_version);
+    println!("  Format: {}", format);
+
+    Ok(())
+}
+
+/// Reads a QR code and extracts the KAMO code.
+fn qr_read(input: &PathBuf, output: Option<&PathBuf>) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    // Read QR code
+    let data = read_qr_from_file(input)
+        .with_context(|| format!("Failed to read QR code from {}", input.display()))?;
+
+    if let Some(output_path) = output {
+        // Write raw bytes to file
+        std::fs::write(output_path, &data)
+            .with_context(|| format!("Failed to write to {}", output_path.display()))?;
+        println!("KAMO code written to: {}", output_path.display());
+        println!("  Size: {} bytes", data.len());
+    } else {
+        // Output as base64 (standard KAMO code format)
+        let base64_code = BASE64.encode(&data);
+        println!("{}", base64_code);
+    }
+
+    Ok(())
+}
+
+/// Shows QR code capacity information.
+fn qr_info(size: Option<usize>, code: Option<&String>) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    let data_size = if let Some(s) = size {
+        s
+    } else if let Some(c) = code {
+        BASE64
+            .decode(c)
+            .context("Failed to decode base64 code")?
+            .len()
+    } else {
+        anyhow::bail!("Provide either --size or --code");
+    };
+
+    let info = qr_capacity_info(data_size);
+
+    println!("QR Code Capacity Analysis");
+    println!("========================");
+    println!("  Data size: {} bytes", info.data_bytes);
+    println!("  Base45 encoded: ~{} characters", info.base45_chars);
+
+    if info.fits_in_qr {
+        println!("  QR version needed: {} (of 40)", info.qr_version);
+        println!("  Status: FITS in standard QR code");
+
+        // Provide some context
+        if info.qr_version <= 10 {
+            println!("  Note: Small QR code, easy to scan");
+        } else if info.qr_version <= 25 {
+            println!("  Note: Medium QR code, should scan well");
+        } else {
+            println!("  Note: Large QR code, may need good camera");
+        }
+    } else {
+        println!("  Status: TOO LARGE for standard QR code");
+        println!("  Maximum data: ~2000 bytes");
+        println!("  Consider: Split message or use shorter carrier");
+    }
+
+    // Show Base45 vs Base64 comparison
+    let base64_size = (data_size * 4 + 2) / 3;
+    println!();
+    println!("Encoding comparison for QR:");
+    println!("  Base45 (alphanumeric mode): ~{} chars", info.base45_chars);
+    println!("  Base64 (byte mode): ~{} chars", base64_size);
+    println!(
+        "  Base45 advantage: ~{:.0}% more capacity",
+        (1.0 - info.base45_chars as f64 / base64_size as f64 / 1.5) * 100.0
+    );
 
     Ok(())
 }

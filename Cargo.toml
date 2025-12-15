@@ -30,6 +30,11 @@ base64 = "0.22"
 image = "0.25"
 hound = "3.5"
 
+# QR code generation and reading
+base45 = "3.1"
+qrcode = "0.14"
+rqrr = "0.7"
+
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 

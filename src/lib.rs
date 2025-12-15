@@ -75,6 +75,7 @@ pub const MIN_SIZE: usize = 64;
 pub mod crypto;
 pub mod decoder;
 pub mod encoder;
+pub mod qr;
 pub mod stego;
 pub mod text;
 
@@ -82,4 +83,5 @@ pub mod text;
 pub use crypto::KeyPair;
 pub use decoder::{decode, decode_with_config, DecodedMessage, DecoderConfig};
 pub use encoder::{encode, encode_with_config, EncodedData, EncodedMessage, EncoderConfig, EncoderError};
+pub use qr::{decode_base45, encode_base45, generate_qr, read_qr, QrError, QrFormat};
 pub use text::fragment::FoundFragment;
