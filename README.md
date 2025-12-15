@@ -1,7 +1,9 @@
 # Anyhide - Steganography Tool for Hiding Any Data in Any File
 
+[![Crates.io](https://img.shields.io/crates/v/anyhide.svg)](https://crates.io/crates/anyhide)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+[![GitHub Release](https://img.shields.io/github/v/release/matutetandil/anyhide)](https://github.com/matutetandil/anyhide/releases)
 
 **Hide anything inside anything.** Anyhide is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
 
@@ -125,9 +127,19 @@ Anyhide uses a **pre-shared carrier** model:
 
 ## Installation
 
-### Prerequisites
+### From crates.io (Recommended)
 
-- Rust 1.70 or later
+```bash
+cargo install anyhide
+```
+
+### Download Pre-built Binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/matutetandil/anyhide/releases):
+
+- **Linux**: `anyhide-linux-x86_64` or `anyhide-linux-aarch64`
+- **macOS**: `anyhide-macos-x86_64` (Intel) or `anyhide-macos-aarch64` (Apple Silicon)
+- **Windows**: `anyhide-windows-x86_64.exe`
 
 ### Build from Source
 
