@@ -450,6 +450,20 @@ All code follows SOLID principles:
 - Open/Closed: Extensible through traits and configurations
 - Dependency Inversion: Core logic doesn't depend on concrete implementations
 
+## Disclaimer
+
+**KAMO is provided for educational and legitimate privacy purposes only.**
+
+This software is a tool, and like any tool, it can be used for good or bad purposes. The authors and contributors:
+
+- **DO NOT** endorse or encourage any illegal activities
+- **ARE NOT** responsible for how this software is used
+- **PROVIDE** this software "as is" without warranty of any kind
+
+**You are solely responsible for ensuring your use complies with all applicable laws and regulations in your jurisdiction.** Legitimate uses include protecting personal privacy, secure communication, research, and educational purposes.
+
+By using KAMO, you agree that the authors bear no liability for any misuse or damages arising from the use of this software.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
