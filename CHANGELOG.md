@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-12-14
+
+### Added
+
+- **Message Compression** (`src/crypto/compression.rs`)
+  - DEFLATE compression before encryption
+  - Automatic: only compresses if it reduces size
+  - Allows longer messages in same carrier
+
+- **Forward Secrecy** (`src/crypto/mod.rs`)
+  - Ephemeral X25519 keypairs for each message
+  - Compromised long-term key doesn't expose past messages
+  - Ephemeral public key included in ciphertext
+
+- **Suffix Array** (`src/text/suffix_array.rs`)
+  - O(m * log n) substring search instead of O(n * m)
+  - `IndexedCarrier` for fast repeated searches
+  - Unicode-aware character/byte position mapping
+
+- **Multi-Recipient Encryption** (`src/crypto/multi_recipient.rs`)
+  - Encrypt once, send to multiple recipients
+  - Each recipient gets encrypted copy of symmetric key
+  - Efficient: message encrypted only once
+
+- **Image Steganography** (`src/stego/image.rs`)
+  - LSB (Least Significant Bit) hiding in PNG/BMP
+  - Capacity: ~3 bytes per 8 pixels
+  - Survives PNG compression
+
+- **Audio Steganography** (`src/stego/audio.rs`)
+  - LSB hiding in WAV files (16-bit PCM)
+  - Capacity: 1 byte per 8 samples
+  - Imperceptible to human ear
+
+### Changed
+
+- Protocol version bumped to 6
+- Encryption now includes compression + forward secrecy by default
+
+### Security
+
+- **Forward Secrecy**: Past messages remain secure even if long-term key is compromised
+- **Compression**: Reduces patterns in encrypted data
+- **Multi-carrier**: Can now hide in text, images, or audio
+
+### Migration from v0.4.1
+
+v0.5.0 uses a different encryption format due to:
+- Compression layer
+- Ephemeral key prepended to ciphertext
+- Protocol version 6
+
+| v0.4.1 | v0.5.0 |
+|--------|--------|
+| No compression | DEFLATE compression |
+| Static key exchange | Ephemeral key exchange |
+| Text carrier only | Text, image, audio carriers |
+| Single recipient | Multi-recipient support |
+| Protocol version 5 | Protocol version 6 |
+
 ## [0.4.1] - 2025-12-14
 
 ### Changed

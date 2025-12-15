@@ -64,7 +64,7 @@
 //! - [`decoder`]: Message decoding (never fails)
 
 /// Protocol version
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 /// Block size for padding (in characters)
 pub const BLOCK_SIZE: usize = 256;
@@ -75,6 +75,7 @@ pub const MIN_SIZE: usize = 64;
 pub mod crypto;
 pub mod decoder;
 pub mod encoder;
+pub mod stego;
 pub mod text;
 
 // Re-export commonly used types at the crate root

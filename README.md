@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 
-KAMO is a steganography tool that hides messages within **pre-shared carrier text** using hybrid encryption. Unlike traditional steganography, the carrier text is never transmitted - only a short encrypted code is sent.
+KAMO is an advanced steganography tool that hides messages in **text, images, or audio** using hybrid encryption with forward secrecy. Unlike traditional steganography, carriers are pre-shared - only encrypted codes are transmitted.
 
 ## Overview
 
-KAMO v0.4.1 uses a **pre-shared carrier** approach with enhanced security:
+KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 
 1. Both parties agree on a carrier text beforehand (a book chapter, news article, song lyrics, etc.)
 2. Message is **fragmented** into variable-sized pieces based on passphrase
@@ -19,6 +19,10 @@ KAMO v0.4.1 uses a **pre-shared carrier** approach with enhanced security:
 
 ### Key Features
 
+- **Multi-Carrier Support**: Hide in text, images (PNG/BMP), or audio (WAV)
+- **Forward Secrecy**: Ephemeral keys - compromised key doesn't expose past messages
+- **Message Compression**: DEFLATE compression allows longer messages
+- **Multi-Recipient**: Encrypt once for multiple recipients efficiently
 - **No AI Required**: Simple, deterministic, works completely offline
 - **Minimal Transmission**: Only a short base64 code is sent
 - **Pre-shared Carrier**: The carrier is never transmitted, providing additional security
@@ -28,6 +32,7 @@ KAMO v0.4.1 uses a **pre-shared carrier** approach with enhanced security:
 - **Plausible Deniability**: Wrong carrier/passphrase = different message (not error)
 - **Block Padding**: Message length hidden by padding to 256-char blocks
 - **Random Positions**: Fragments scattered throughout carrier (non-sequential)
+- **Fast Search**: Suffix array for O(m·log n) substring search
 
 ## How It Works
 
@@ -292,4 +297,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.4.1 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.5.0 (see [CHANGELOG.md](CHANGELOG.md))
