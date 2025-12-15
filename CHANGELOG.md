@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Capacity: 1 byte per 8 samples
   - Imperceptible to human ear
 
+- **New CLI Commands** (`src/main.rs`)
+  - `image-hide` / `image-extract` - Hide/extract data in images
+  - `audio-hide` / `audio-extract` - Hide/extract data in audio
+  - `multi-encrypt` / `multi-decrypt` - Multi-recipient encryption
+  - `capacity` - Show image/audio capacity for hiding data
+
 ### Changed
 
 - Protocol version bumped to 6

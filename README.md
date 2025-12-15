@@ -170,6 +170,36 @@ kamo decode
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
   -v, --verbose          Show positions and fragments
+
+kamo image-hide
+  -i, --image <PATH>     Path to cover image (PNG/BMP)
+  -d, --data <DATA>      Data to hide (or reads from stdin)
+  -o, --output <PATH>    Output path for stego image
+
+kamo image-extract
+  -i, --image <PATH>     Path to stego image
+
+kamo audio-hide
+  -a, --audio <PATH>     Path to cover audio (WAV 16-bit PCM)
+  -d, --data <DATA>      Data to hide (or reads from stdin)
+  -o, --output <PATH>    Output path for stego audio
+
+kamo audio-extract
+  -a, --audio <PATH>     Path to stego audio
+
+kamo multi-encrypt
+  -m, --message <MSG>    Message to encrypt (or reads from stdin)
+  -p, --passphrase <PASS> Passphrase for encryption
+  -k, --keys <PATHS>...  Paths to recipients' public keys
+  -o, --output <PATH>    Output file (prints base64 if not specified)
+
+kamo multi-decrypt
+  -i, --input <INPUT>    Encrypted data (base64 string or file path)
+  -p, --passphrase <PASS> Passphrase for decryption
+  -k, --key <PATH>       Path to your private key
+
+kamo capacity
+  -f, --file <PATH>      Path to image or audio file
 ```
 
 ## Security Properties
@@ -207,6 +237,55 @@ Anyone intercepting "AxB2c3..." has no idea:
 - What carrier was used
 - What the message is
 
+## Example: Image Steganography
+
+Hide encrypted data inside a PNG or BMP image:
+
+```bash
+# Check image capacity
+kamo capacity -f cover_photo.png
+# Output: Image capacity: 12500 bytes
+
+# Hide data in the image
+kamo image-hide -i cover_photo.png -d "Secret message" -o stego_photo.png
+
+# Extract hidden data
+kamo image-extract -i stego_photo.png
+# Output: Secret message
+```
+
+## Example: Audio Steganography
+
+Hide encrypted data inside a WAV audio file:
+
+```bash
+# Check audio capacity
+kamo capacity -f song.wav
+# Output: Audio capacity: 50000 bytes (10.5 seconds)
+
+# Hide data in audio
+kamo audio-hide -a song.wav -d "Secret message" -o stego_song.wav
+
+# Extract hidden data
+kamo audio-extract -a stego_song.wav
+# Output: Secret message
+```
+
+## Example: Multi-Recipient Encryption
+
+Encrypt a message for multiple recipients at once:
+
+```bash
+# Encrypt for Alice, Bob, and Charlie
+kamo multi-encrypt -m "Team meeting at 5pm" -p "shared_secret" \
+  -k alice.pub -k bob.pub -k charlie.pub
+# Output: AQMAAABhYmNkZWZn... (base64 encrypted data)
+
+# Each recipient decrypts with their own private key
+kamo multi-decrypt -i "AQMAAABhYmNkZWZn..." -p "shared_secret" -k alice.key
+# Output: Team meeting at 5pm
+```
+
 ## Project Structure
 
 ```
@@ -215,16 +294,23 @@ kamo/
 │   ├── main.rs              # CLI with clap
 │   ├── lib.rs               # Public re-exports, constants
 │   ├── crypto/
-│   │   ├── mod.rs
+│   │   ├── mod.rs           # Hybrid encryption with forward secrecy
 │   │   ├── keys.rs          # X25519 key generation, PEM format
 │   │   ├── asymmetric.rs    # Encrypt/decrypt with X25519 + ChaCha20
-│   │   └── symmetric.rs     # Passphrase-based encryption
+│   │   ├── symmetric.rs     # Passphrase-based encryption
+│   │   ├── compression.rs   # DEFLATE compression
+│   │   └── multi_recipient.rs # Multi-recipient encryption
 │   ├── text/
 │   │   ├── mod.rs
 │   │   ├── permute.rs       # Carrier permutation, distributed selection
 │   │   ├── padding.rs       # Block padding
-│   │   ├── fragment.rs      # Message fragmentation (legacy)
-│   │   └── tokenize.rs      # Carrier search utilities
+│   │   ├── fragment.rs      # Adaptive message fragmentation
+│   │   ├── tokenize.rs      # Carrier search utilities
+│   │   └── suffix_array.rs  # O(m·log n) substring search
+│   ├── stego/
+│   │   ├── mod.rs
+│   │   ├── image.rs         # LSB steganography for PNG/BMP
+│   │   └── audio.rs         # LSB steganography for WAV
 │   ├── encoder.rs           # Permute → find → pad → encrypt
 │   └── decoder.rs           # Decrypt → permute → extract (never fails)
 ├── tests/
