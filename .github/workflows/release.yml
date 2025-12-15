@@ -22,12 +22,13 @@ jobs:
             artifact_name: anyhide
             asset_name: anyhide-linux-x86_64
 
-          # Linux ARM64
+          # Linux ARM64 (uses vendored OpenSSL for cross-compilation)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: anyhide
             asset_name: anyhide-linux-aarch64
             cross: true
+            features: vendored-openssl
 
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
@@ -66,7 +67,7 @@ jobs:
 
       - name: Build binary (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

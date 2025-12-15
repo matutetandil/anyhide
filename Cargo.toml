@@ -1,6 +1,6 @@
 [package]
 name = "anyhide"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Hide any data in any file - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"
@@ -37,8 +37,11 @@ rqrr = "0.7"
 # CLI
 clap = { version = "4.0", features = ["derive"] }
 
-# Self-update
-self_update = { version = "0.41", features = ["archive-tar", "archive-zip", "compression-flate2"] }
+# Self-update (rustls for cross-compilation compatibility)
+self_update = { version = "0.41", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "rustls"] }
+
+# Vendored OpenSSL for cross-compilation (some transitive deps need it)
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 
 # Error handling
 anyhow = "1.0"
@@ -54,3 +57,7 @@ path = "src/main.rs"
 [lib]
 name = "anyhide"
 path = "src/lib.rs"
+
+[features]
+default = []
+vendored-openssl = ["openssl"]

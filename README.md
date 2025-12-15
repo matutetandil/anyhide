@@ -489,4 +489,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.6.0 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.6.1 (see [CHANGELOG.md](CHANGELOG.md))
