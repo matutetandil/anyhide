@@ -104,7 +104,7 @@ KAMO v0.5.1 uses a **pre-shared carrier** approach with enhanced security:
 ### Build from Source
 
 ```bash
-git clone https://github.com/your-repo/kamo.git
+git clone https://github.com/matutetandil/kamo.git
 cd kamo
 cargo build --release
 ```
