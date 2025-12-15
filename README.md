@@ -42,20 +42,19 @@ KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  INPUTS:                                                            │
-│  ├── Carrier: "Amanda fue al parque con su hermano ayer"           │
-│  ├── Message: "ama parque"                                         │
-│  ├── Passphrase: "secreto"                                         │
+│  ├── Carrier: "The amazing Amanda went to the park yesterday"      │
+│  ├── Message: "ama park"                                           │
+│  ├── Passphrase: "secret"                                          │
 │  └── Recipient's public key                                         │
 │                                                                     │
 │  PROCESS:                                                           │
-│  1. Fragment message: ["ama", "p", "arq", "ue"] (passphrase-based) │
-│  2. Find "ama" as substring → position 0 (in "Amanda")             │
-│  3. Find "p" at 11 positions → random select → position 14         │
-│  4. Find "arq" → position 15 (in "parque")                         │
-│  5. Find "ue" at 3 positions → random select → position 18         │
-│  6. Pad with random carrier substrings to 256 chars                │
-│  7. Serialize: {version: 5, real_count: 4, fragments: [...]}       │
-│  8. Encrypt with passphrase + public key → base64                  │
+│  1. Fragment message: ["ama", "p", "ark"] (passphrase-based)       │
+│  2. Find "ama" as substring → position 4 (in "amazing")            │
+│  3. Find "p" at 3 positions → random select → position 31          │
+│  4. Find "ark" → position 32 (in "park")                           │
+│  5. Pad with random carrier substrings to 256 chars                │
+│  6. Serialize: {version: 6, real_count: 3, fragments: [...]}       │
+│  7. Encrypt with passphrase + public key → base64                  │
 │                                                                     │
 │  OUTPUT: "oaiN3zrH..." (base64 encrypted code)                     │
 │                                                                     │
@@ -72,20 +71,19 @@ KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 │  INPUTS:                                                            │
 │  ├── Code: "oaiN3zrH..."                                           │
 │  ├── Carrier: (same text as sender used)                           │
-│  ├── Passphrase: "secreto"                                         │
+│  ├── Passphrase: "secret"                                          │
 │  └── Recipient's private key                                        │
 │                                                                     │
 │  PROCESS:                                                           │
-│  1. Decrypt code → {version: 5, real_count: 4, fragments: [...]}   │
-│  2. Extract only first 4 fragments (real_count, ignore padding)    │
+│  1. Decrypt code → {version: 6, real_count: 3, fragments: [...]}   │
+│  2. Extract only first 3 fragments (real_count, ignore padding)    │
 │  3. Look up chars at each position:                                │
-│     pos 0, len 3 → "Ama"                                           │
-│     pos 14, len 1 → "p" + space marker                             │
-│     pos 15, len 3 → "arq"                                          │
-│     pos 18, len 2 → "ue"                                           │
-│  4. Concatenate: "Ama parque"                                      │
+│     pos 4, len 3 → "ama"                                           │
+│     pos 31, len 1 → "p" + space marker                             │
+│     pos 32, len 3 → "ark"                                          │
+│  4. Concatenate: "ama park"                                        │
 │                                                                     │
-│  OUTPUT: "Ama parque"                                              │
+│  OUTPUT: "ama park"                                              │
 │                                                                     │
 │  ✓ NEVER returns error - wrong inputs produce garbage              │
 │  ✓ Wrong passphrase? Different fragmentation → different message   │
@@ -126,13 +124,13 @@ kamo keygen -o mykeys
 
 ```bash
 # Create a carrier file (or use any existing text file)
-echo "Ayer mi tía Marta me llamó por teléfono para decirme algo" > carrier.txt
+echo "Yesterday my aunt Martha called me on the phone to tell me something" > carrier.txt
 
 # Encode a message
 kamo encode \
   --carrier carrier.txt \
-  --message "Marta llamó" \
-  --passphrase "secreto123" \
+  --message "Martha called" \
+  --passphrase "secret123" \
   --key recipient.pub
 
 # Output: AwNhYmNkZWZn... (encrypted code to send)
@@ -145,10 +143,10 @@ kamo encode \
 kamo decode \
   --code "AwNhYmNkZWZn..." \
   --carrier carrier.txt \
-  --passphrase "secreto123" \
+  --passphrase "secret123" \
   --key my.key
 
-# Output: Marta llamó
+# Output: Martha called
 ```
 
 ### Available Options
@@ -216,20 +214,20 @@ kamo capacity
 
 ## Example: Using a Public Text as Carrier
 
-Both Alice and Bob agree to use the first paragraph of "Don Quixote" as their carrier:
+Both Alice and Bob agree to use the first paragraph of "Moby Dick" as their carrier:
 
 ```bash
 # carrier.txt contains:
-# "En un lugar de la Mancha, de cuyo nombre no quiero acordarme,
-# no ha mucho tiempo que vivía un hidalgo de los de lanza en astillero..."
+# "Call me Ishmael. Some years ago—never mind how long precisely—having
+# little or no money in my purse, and nothing particular to interest me..."
 
-# Alice encodes "lugar Mancha"
-kamo encode -c carrier.txt -m "lugar Mancha" -p "cervantes" -k bob.pub
+# Alice encodes "call me"
+kamo encode -c carrier.txt -m "call me" -p "melville" -k bob.pub
 # Output: AxB2c3...
 
 # Bob decodes
-kamo decode --code "AxB2c3..." -c carrier.txt -p "cervantes" -k bob.key
-# Output: lugar Mancha
+kamo decode --code "AxB2c3..." -c carrier.txt -p "melville" -k bob.key
+# Output: call me
 ```
 
 Anyone intercepting "AxB2c3..." has no idea:
@@ -364,18 +362,6 @@ All code follows SOLID principles:
 - Single Responsibility: Each module handles one concern
 - Open/Closed: Extensible through traits and configurations
 - Dependency Inversion: Core logic doesn't depend on concrete implementations
-
-## Comparison with Previous Versions
-
-| Aspect | v0.2 (AI) | v0.3 (Pre-shared) | v0.4 (Current) |
-|--------|-----------|-------------------|----------------|
-| Encoding | Fragments | Char substrings | Words |
-| Carrier | AI-generated | Pre-shared | Pre-shared + permuted |
-| Permutation | No | No | Yes (passphrase) |
-| Padding | No | No | Yes (256-char blocks) |
-| Position Distribution | No | No | Yes |
-| AI Required | Yes | No | No |
-| Offline | No | Yes | Yes |
 
 ## License
 
