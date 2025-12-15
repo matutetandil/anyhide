@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-12-15
+
+### Added
+
+- **Self-Update Command**
+  - New `anyhide update` command to update to the latest version
+  - Automatically detects platform (Linux/macOS/Windows) and architecture (x86_64/aarch64)
+  - Downloads the correct binary from GitHub Releases
+  - Use `--check` to only check for updates without installing
+
 ## [0.5.3] - 2025-12-15
 
 ### Added

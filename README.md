@@ -239,6 +239,9 @@ anyhide qr-read
 anyhide qr-info
   -s, --size <BYTES>     Data size in bytes
   -c, --code <CODE>      Or provide Anyhide code to analyze
+
+anyhide update
+  --check                Only check for updates, don't install
 ```
 
 ## Security Properties
@@ -486,4 +489,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.5.3 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.6.0 (see [CHANGELOG.md](CHANGELOG.md))
