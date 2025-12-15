@@ -1,12 +1,12 @@
 [package]
 name = "anyhide"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 description = "Hide any data in any file - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"
 authors = ["Anyhide Contributors"]
 repository = "https://github.com/matutetandil/anyhide"
-keywords = ["steganography", "cryptography", "privacy", "security", "encryption", "hide-files"]
+keywords = ["steganography", "cryptography", "privacy", "encryption", "security"]
 categories = ["command-line-utilities", "cryptography"]
 
 [dependencies]

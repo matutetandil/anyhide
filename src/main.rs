@@ -22,7 +22,7 @@ use anyhide::{
 /// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
 #[command(name = "anyhide")]
-#[command(version = "0.5.2")]
+#[command(version = "0.5.3")]
 #[command(about = "Advanced steganography with compression, forward secrecy, and multi-carrier support")]
 #[command(long_about = None)]
 struct Cli {
