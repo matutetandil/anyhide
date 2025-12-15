@@ -193,6 +193,8 @@ kamo encode
   -p, --passphrase <PASS> Passphrase for encryption
   -k, --key <PATH>       Path to recipient's public key
   -v, --verbose          Show positions found
+  --qr <PATH>            Generate QR code and save to file (in addition to printing code)
+  --qr-format <FMT>      QR format: png (default), svg, or ascii
 
 kamo decode
   --code <CODE>          The encrypted code to decode
@@ -352,12 +354,14 @@ kamo multi-decrypt -i "AQMAAABhYmNkZWZn..." -p "shared_secret" -k alice.key
 Share KAMO codes via QR code for easy mobile scanning:
 
 ```bash
-# Generate a KAMO code
-CODE=$(kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub)
+# Generate KAMO code + QR in one step (recommended)
+kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub --qr code.png
+# Output: AxB2c3F4... (KAMO code)
+#         QR code saved: code.png
 
-# Convert to QR code (uses Base45 for optimal capacity)
+# Or generate QR separately from existing code
+CODE=$(kamo encode -c carrier.txt -m "secret message" -p "pass" -k bob.pub)
 kamo qr-generate -c "$CODE" -o kamo_code.png
-# Output: QR code generated (Version 15, ~480 chars)
 
 # Read QR code back to KAMO code
 kamo qr-read -i kamo_code.png
@@ -470,4 +474,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.5.1 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.5.2 (see [CHANGELOG.md](CHANGELOG.md))

@@ -22,7 +22,7 @@ use kamo::{
 /// Use ANY file as a pre-shared carrier - only encrypted KAMO codes are transmitted.
 #[derive(Parser)]
 #[command(name = "kamo")]
-#[command(version = "0.5.1")]
+#[command(version = "0.5.2")]
 #[command(about = "Advanced steganography with compression, forward secrecy, and multi-carrier support")]
 #[command(long_about = None)]
 struct Cli {
@@ -72,6 +72,14 @@ enum Commands {
         /// Verbose output (shows fragmentation and positions)
         #[arg(short, long)]
         verbose: bool,
+
+        /// Generate QR code and save to this path (in addition to printing the code)
+        #[arg(long)]
+        qr: Option<PathBuf>,
+
+        /// QR code format: png (default), svg, or ascii
+        #[arg(long, default_value = "png")]
+        qr_format: String,
     },
 
     /// Decode a message using a pre-shared carrier (ANY file)
@@ -198,7 +206,9 @@ fn main() -> Result<()> {
             passphrase,
             key,
             verbose,
-        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose)?,
+            qr,
+            qr_format,
+        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format)?,
 
         Commands::Decode {
             code,
@@ -260,6 +270,7 @@ fn keygen(output: &PathBuf) -> Result<()> {
 /// Encodes a message or file into an encrypted code.
 /// Supports text messages (--message) or binary files (--file).
 /// Carrier type is auto-detected by extension.
+/// Optionally generates a QR code if --qr is specified.
 fn encode_cmd(
     carrier_path: &PathBuf,
     message: Option<String>,
@@ -267,6 +278,8 @@ fn encode_cmd(
     passphrase: &str,
     key_path: &PathBuf,
     verbose: bool,
+    qr_output: Option<&PathBuf>,
+    qr_format: &str,
 ) -> Result<()> {
     // Load carrier with auto-detection based on file extension
     let carrier = Carrier::from_file(carrier_path)
@@ -332,6 +345,35 @@ fn encode_cmd(
             "Encoded {} real fragments ({} total with padding)",
             encoded.real_fragment_count, encoded.total_fragments
         );
+    }
+
+    // Generate QR code if requested
+    if let Some(qr_path) = qr_output {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let data = BASE64
+            .decode(&encoded.code)
+            .context("Failed to decode generated code for QR")?;
+
+        let format = match qr_format.to_lowercase().as_str() {
+            "png" => QrFormat::Png,
+            "svg" => QrFormat::Svg,
+            "ascii" | "txt" => QrFormat::Ascii,
+            _ => anyhow::bail!("Unknown QR format: {}. Use: png, svg, or ascii", qr_format),
+        };
+
+        let config = QrConfig {
+            format,
+            ..Default::default()
+        };
+
+        generate_qr_to_file(&data, qr_path, &config)
+            .context("Failed to generate QR code")?;
+
+        let info = qr_capacity_info(data.len());
+        eprintln!();
+        eprintln!("QR code saved: {}", qr_path.display());
+        eprintln!("  QR version: {} | Format: {}", info.qr_version, qr_format);
     }
 
     Ok(())

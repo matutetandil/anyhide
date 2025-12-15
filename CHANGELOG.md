@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2025-12-15
+
+### Added
+
+- **Inline QR Code Generation**
+  - New `--qr <path>` option in `encode` command
+  - Generate KAMO code and QR in one step
+  - `--qr-format` option for png/svg/ascii output
+  - Example: `kamo encode -c carrier.txt -m "msg" -p "pass" -k bob.pub --qr code.png`
+
 ## [0.5.1] - 2025-12-15
 
 ### Changed
