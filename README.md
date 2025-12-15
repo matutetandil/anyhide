@@ -1,41 +1,69 @@
-# KAMO - Key Asymmetric Message Obfuscation
+# KAMO - Steganography Tool for Hiding Any Data in Any File
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 
-KAMO is an advanced steganography tool that hides messages in **any file** using hybrid encryption with forward secrecy. Unlike traditional steganography, carriers are pre-shared - only encrypted codes are transmitted.
+**Hide anything inside anything.** KAMO is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
+
+## Why KAMO?
+
+Traditional steganography modifies the carrier file and transmits it. KAMO is different:
+
+| Traditional Steganography | KAMO |
+|---------------------------|------|
+| Modifies the carrier file | Never touches the carrier |
+| Transmits the modified file | Transmits only a short code |
+| Carrier can be analyzed | Carrier stays untouched |
+| Hide text in images | Hide **anything** in **anything** |
+
+**Use cases:**
+- Hide encrypted files inside a shared video
+- Conceal sensitive documents using a public PDF as carrier
+- Store secrets referenced by any file both parties have
+- Covert communication with plausible deniability
 
 ## Overview
 
-KAMO v0.5.1 uses a **pre-shared carrier** approach with enhanced security:
+KAMO uses a **pre-shared carrier** model:
 
-1. Both parties agree on a carrier file beforehand (ANY file: text, image, video, PDF, executable, etc.)
-2. Message is **fragmented** into variable-sized pieces based on passphrase
-3. Fragments are found as **substrings** (text) or **byte sequences** (binary files)
-4. Positions are **randomly distributed** - not sequential (Fragment 1 can be at end, Fragment 5 at start)
-5. Message is **padded** to block boundaries to hide its length
-6. Positions are encrypted with passphrase (symmetric) + public key (asymmetric)
-7. **Only the encrypted code is transmitted** - not the carrier
+1. Both parties have the same file (ANY file: image, video, PDF, executable, text, etc.)
+2. Sender hides data (text OR binary files) by finding byte patterns in the carrier
+3. Only an encrypted code is transmitted - **the carrier is never sent**
+4. Receiver uses the same carrier + code to extract the hidden data
 
-### Key Features
+```
+┌─────────────────────────────────────────────────────────────┐
+│  SENDER                         RECEIVER                    │
+│                                                             │
+│  carrier.mp4 ──┐                      ┌── carrier.mp4       │
+│                │                      │   (same file)       │
+│  secret.zip ───┼──► KAMO CODE ────────┼──► secret.zip       │
+│                │   (only this         │                     │
+│  passphrase ───┘    is sent)          └── passphrase        │
+│                                                             │
+│  The carrier is NEVER transmitted                           │
+└─────────────────────────────────────────────────────────────┘
+```
 
-- **Universal Carrier Support**: Use ANY file as carrier (text, images, audio, video, PDFs, executables, etc.)
-- **Binary Message Support**: Hide ANY data (text or binary files) inside carriers
-- **QR Code Support**: Generate/read QR codes with Base45 encoding for optimal capacity
-- **Forward Secrecy**: Ephemeral keys - compromised key doesn't expose past messages
-- **Message Compression**: DEFLATE compression allows longer messages
-- **Multi-Recipient**: Encrypt once for multiple recipients efficiently
-- **No AI Required**: Simple, deterministic, works completely offline
-- **Minimal Transmission**: Only a short base64 code is sent
-- **Pre-shared Carrier**: The carrier is never transmitted, providing additional security
-- **Substring Matching**: "ama" found in "Amanda" - works across languages!
-- **Dual-layer Encryption**: Symmetric (passphrase) + Asymmetric (X25519)
-- **Never Fails**: Decoder ALWAYS returns something - never errors (prevents brute-force)
-- **Plausible Deniability**: Wrong carrier/passphrase = different message (not error)
-- **Indistinguishable Codes**: KAMO code reveals nothing about content type (text vs binary)
-- **Block Padding**: Message length hidden by padding to 256-char blocks
-- **Random Positions**: Fragments scattered throughout carrier (non-sequential)
-- **Fast Search**: Suffix array for O(m·log n) substring search
+## Key Features
+
+### Hide Anything in Anything
+- **Any carrier**: text, images, audio, video, PDFs, executables, archives, databases
+- **Any payload**: text messages, binary files, documents, compressed archives
+- **Indistinguishable**: KAMO code reveals nothing about what's hidden (text vs 10MB file)
+
+### Military-Grade Security
+- **Dual-layer encryption**: Symmetric (ChaCha20-Poly1305) + Asymmetric (X25519)
+- **Forward secrecy**: Ephemeral keys - past messages stay secure even if keys leak
+- **Plausible deniability**: Wrong passphrase returns garbage, not an error
+- **Never fails**: Decoder always returns something - prevents brute-force detection
+
+### Practical Features
+- **QR code support**: Share codes via QR with Base45 encoding
+- **Multi-recipient**: Encrypt once for multiple recipients
+- **Compression**: DEFLATE compression for longer messages
+- **Offline**: Works completely offline, no external services
+- **Fast**: Suffix array for O(m·log n) substring search
 
 ## How It Works
 
