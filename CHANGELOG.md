@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2025-12-15
+
+### Changed
+
+- **Universal Carrier Support**
+  - ANY file can now be used as a carrier (not just text, images, or audio)
+  - Works with: PDFs, videos (mp4, avi), executables, archives (zip), any binary file
+  - `encode -c anyfile.xyz` produces a KAMO code (file not modified)
+  - Uses byte-sequence matching for all non-text files
+  - Same workflow regardless of file type
+
+- **CLI Auto-Detection**
+  - Carrier type (text/binary) auto-detected by file extension
+  - Text: .txt, .md, .csv, .json, .xml, .html, .htm (substring matching)
+  - Binary: ALL other files (byte-sequence matching)
+
+### Removed
+
+- **Legacy LSB Steganography**
+  - Removed `image-hide`, `image-extract` commands
+  - Removed `audio-hide`, `audio-extract` commands
+  - Removed `capacity` command
+  - Removed `src/stego/` module entirely
+  - Removed `hound` dependency (WAV audio processing)
+  - These commands modified carriers (traditional steganography)
+  - Use `encode/decode -c file` instead (KAMO model - never modifies carrier)
+
+### Added
+
+- **Binary Message Support**
+  - Hide ANY data inside carriers (not just text messages)
+  - `encode --file secret.zip` to encode binary files
+  - `decode -o output.bin` to extract binary data
+  - KAMO code is indistinguishable (no metadata reveals if content is text/binary)
+  - `encode_bytes_with_carrier()` / `decode_bytes_with_carrier()` API
+  - `fragment_bytes_for_carrier()` for raw byte fragmentation
+  - `DecodedBytes` struct for binary decoding results
+
+- **Carrier Abstraction** (`src/text/carrier.rs`)
+  - `Carrier` enum supporting Text and Binary variants
+  - `BinaryCarrierSearch` for byte-sequence matching
+  - `fragment_message_for_binary()` for adaptive text-in-binary fragmentation
+  - Auto-loading with `Carrier::from_file()`
+
+- **Generic Encoder/Decoder**
+  - `encode_with_carrier()` - works with any carrier type
+  - `decode_with_carrier()` - works with any carrier type
+  - Unified API for text, images, and audio
+
+### Migration from v0.5.0
+
+The new carrier model is the recommended approach:
+
+| v0.5.0 (LSB) | v0.5.1 (KAMO model) |
+|--------------|---------------------|
+| `image-hide -i img.png -o stego.png` | `encode -c img.png -m "msg"` |
+| `image-extract -i stego.png` | `decode -c img.png --code "..."` |
+| Modifies carrier | Never modifies carrier |
+| Transmits modified file | Transmits only KAMO code |
+
 ## [0.5.0] - 2025-12-14
 
 ### Added

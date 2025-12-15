@@ -1,13 +1,15 @@
-//! Message encoding for KAMO v0.4.1 steganography.
+//! Message encoding for KAMO v0.5 steganography.
 //!
 //! This module orchestrates the encoding process:
 //! 1. Fragment message into variable-sized pieces (passphrase-based)
-//! 2. Find each fragment as substring in carrier (case-insensitive)
+//! 2. Find each fragment as substring in carrier (case-insensitive for text, byte-sequence for binary)
 //! 3. Select positions randomly from all occurrences (distributed)
 //! 4. Pad with random carrier substrings to block boundary
 //! 5. Serialize with version and real_count
 //! 6. Encrypt (symmetric + asymmetric)
 //! 7. Return base64 code
+//!
+//! Supports both text carriers (text files, articles) and binary carriers (images, audio).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hkdf::Hkdf;
@@ -20,6 +22,7 @@ use thiserror::Error;
 use x25519_dalek::PublicKey;
 
 use crate::crypto::{encrypt_with_passphrase, EncryptionError};
+use crate::text::carrier::{fragment_bytes_for_carrier, fragment_message_for_binary, BinaryCarrierSearch, Carrier};
 use crate::text::fragment::{fragment_message_adaptive, FoundFragment};
 use crate::text::tokenize::{select_distributed_position, CarrierSearch};
 use crate::{BLOCK_SIZE, MIN_SIZE, VERSION};
@@ -273,6 +276,450 @@ fn generate_padding_fragments(
     }
 
     fragments
+}
+
+// ============================================================================
+// Generic Carrier Support (Text + Binary)
+// ============================================================================
+
+/// Encodes a message using a generic carrier (text or binary).
+///
+/// This is the main entry point for encoding with any carrier type.
+/// Auto-detects whether to use text or binary encoding based on the carrier.
+///
+/// # Arguments
+/// * `carrier` - A generic carrier (text or binary)
+/// * `message` - The secret message to encode
+/// * `passphrase` - Used for fragmentation, position selection, and encryption
+/// * `public_key` - Recipient's public key for asymmetric encryption
+pub fn encode_with_carrier(
+    carrier: &Carrier,
+    message: &str,
+    passphrase: &str,
+    public_key: &PublicKey,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_carrier_config(carrier, message, passphrase, public_key, &EncoderConfig::default())
+}
+
+/// Encodes a message with a generic carrier and custom configuration.
+pub fn encode_with_carrier_config(
+    carrier: &Carrier,
+    message: &str,
+    passphrase: &str,
+    public_key: &PublicKey,
+    config: &EncoderConfig,
+) -> Result<EncodedMessage, EncoderError> {
+    match carrier {
+        Carrier::Text(text_carrier) => {
+            encode_text_carrier(text_carrier, message, passphrase, public_key, config)
+        }
+        Carrier::Binary(binary_carrier) => {
+            encode_binary_carrier(binary_carrier, message, passphrase, public_key, config)
+        }
+    }
+}
+
+/// Encodes using a text carrier (internal, reuses existing logic).
+fn encode_text_carrier(
+    carrier: &CarrierSearch,
+    message: &str,
+    passphrase: &str,
+    public_key: &PublicKey,
+    config: &EncoderConfig,
+) -> Result<EncodedMessage, EncoderError> {
+    // Validate inputs
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(EncoderError::EmptyMessage);
+    }
+
+    if carrier.is_empty() {
+        return Err(EncoderError::EmptyCarrier);
+    }
+
+    if config.verbose {
+        eprintln!("Text carrier has {} characters", carrier.len());
+    }
+
+    // Fragment the message adaptively
+    let fragmented = fragment_message_adaptive(message, carrier, passphrase);
+    let real_count = fragmented.count();
+
+    if config.verbose {
+        eprintln!(
+            "Fragmented into {} pieces: {:?}",
+            real_count,
+            fragmented.search_texts()
+        );
+    }
+
+    // Find each fragment in the carrier with distributed selection
+    let mut found_fragments: Vec<FoundFragment> = Vec::with_capacity(real_count);
+
+    for (i, fragment) in fragmented.fragments.iter().enumerate() {
+        let positions = carrier.find_all(&fragment.search_text);
+
+        if positions.is_empty() {
+            return Err(EncoderError::FragmentNotFound(fragment.search_text.clone()));
+        }
+
+        let selected_pos = select_distributed_position(&positions, passphrase, i)
+            .expect("positions is not empty");
+
+        if config.verbose {
+            eprintln!(
+                "Fragment {}: '{}' found at {} positions, selected {}",
+                i, fragment.search_text, positions.len(), selected_pos
+            );
+        }
+
+        found_fragments.push(FoundFragment::new(
+            selected_pos,
+            fragment.search_text.chars().count(),
+            fragment.space_positions.clone(),
+        ));
+    }
+
+    // Pad with random carrier substrings
+    let current_size = message.len();
+    let target_size = calculate_padded_length(current_size);
+    let padding_fragments = generate_padding_fragments(
+        carrier,
+        passphrase,
+        target_size.saturating_sub(current_size),
+    );
+
+    if config.verbose {
+        eprintln!("Added {} padding fragments", padding_fragments.len());
+    }
+
+    // Combine and encrypt
+    let mut all_fragments = found_fragments;
+    all_fragments.extend(padding_fragments);
+
+    let data = EncodedData {
+        version: VERSION,
+        real_count: real_count as u16,
+        fragments: all_fragments.clone(),
+    };
+
+    let serialized = bincode::serialize(&data)
+        .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
+
+    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let code = BASE64.encode(&encrypted);
+
+    Ok(EncodedMessage {
+        code,
+        real_fragment_count: real_count,
+        total_fragments: all_fragments.len(),
+    })
+}
+
+/// Encodes using a binary carrier (images, audio, etc.).
+///
+/// For binary carriers, the message is converted to bytes and searched
+/// as byte sequences within the carrier data.
+fn encode_binary_carrier(
+    carrier: &BinaryCarrierSearch,
+    message: &str,
+    passphrase: &str,
+    public_key: &PublicKey,
+    config: &EncoderConfig,
+) -> Result<EncodedMessage, EncoderError> {
+    // Validate inputs
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(EncoderError::EmptyMessage);
+    }
+
+    if carrier.is_empty() {
+        return Err(EncoderError::EmptyCarrier);
+    }
+
+    if config.verbose {
+        eprintln!("Binary carrier has {} bytes", carrier.len());
+    }
+
+    // Fragment the message for binary search
+    let fragments = fragment_message_for_binary(message, carrier, passphrase);
+
+    if fragments.is_empty() && !message.is_empty() {
+        // Fragmentation failed - some bytes not found in carrier
+        return Err(EncoderError::FragmentNotFound(
+            "Message bytes not found in binary carrier".to_string()
+        ));
+    }
+
+    let real_count = fragments.len();
+
+    if config.verbose {
+        eprintln!("Fragmented into {} byte sequences", real_count);
+    }
+
+    // Find positions for each fragment
+    let mut found_fragments: Vec<FoundFragment> = Vec::with_capacity(real_count);
+
+    for (i, fragment) in fragments.iter().enumerate() {
+        let positions = carrier.find_all(&fragment.bytes);
+
+        if positions.is_empty() {
+            return Err(EncoderError::FragmentNotFound(
+                format!("Byte sequence {:?} not found", fragment.bytes)
+            ));
+        }
+
+        // Select one position randomly based on passphrase + index
+        let selected_pos = select_distributed_position(&positions, passphrase, i)
+            .expect("positions is not empty");
+
+        if config.verbose {
+            eprintln!(
+                "Fragment {}: {:?} found at {} positions, selected {}",
+                i, fragment.bytes, positions.len(), selected_pos
+            );
+        }
+
+        // For binary, space_positions indicates word boundaries
+        let space_positions = if fragment.ends_word { vec![0] } else { vec![] };
+
+        found_fragments.push(FoundFragment::new(
+            selected_pos,
+            fragment.bytes.len(),
+            space_positions,
+        ));
+    }
+
+    // Pad with random carrier bytes
+    let current_size = message.len();
+    let target_size = calculate_padded_length(current_size);
+    let padding_fragments = generate_padding_fragments_binary(
+        carrier,
+        passphrase,
+        target_size.saturating_sub(current_size),
+    );
+
+    if config.verbose {
+        eprintln!("Added {} padding fragments", padding_fragments.len());
+    }
+
+    // Combine and encrypt
+    let mut all_fragments = found_fragments;
+    all_fragments.extend(padding_fragments);
+
+    let data = EncodedData {
+        version: VERSION,
+        real_count: real_count as u16,
+        fragments: all_fragments.clone(),
+    };
+
+    let serialized = bincode::serialize(&data)
+        .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
+
+    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let code = BASE64.encode(&encrypted);
+
+    Ok(EncodedMessage {
+        code,
+        real_fragment_count: real_count,
+        total_fragments: all_fragments.len(),
+    })
+}
+
+/// Generates padding fragments for binary carriers.
+fn generate_padding_fragments_binary(
+    carrier: &BinaryCarrierSearch,
+    passphrase: &str,
+    approx_bytes_needed: usize,
+) -> Vec<FoundFragment> {
+    if approx_bytes_needed == 0 || carrier.is_empty() {
+        return vec![];
+    }
+
+    // Derive seed for deterministic padding
+    let hk = Hkdf::<Sha256>::new(Some(SALT_PAD), passphrase.as_bytes());
+    let mut seed = [0u8; 32];
+    hk.expand(b"padding-seed-binary", &mut seed)
+        .expect("HKDF expand should not fail");
+
+    let mut rng = ChaCha20Rng::from_seed(seed);
+    let carrier_len = carrier.len();
+
+    let mut fragments = Vec::new();
+    let mut bytes_added = 0;
+
+    while bytes_added < approx_bytes_needed {
+        // Random position in carrier
+        let pos = rng.gen_range(0..carrier_len);
+
+        // Random length between 1 and 5
+        let len = rng.gen_range(1..=5).min(carrier_len - pos);
+
+        if len > 0 {
+            fragments.push(FoundFragment::new(pos, len, vec![]));
+            bytes_added += len;
+        }
+    }
+
+    fragments
+}
+
+// ============================================================================
+// Binary Message Support (for encoding arbitrary bytes, not just text)
+// ============================================================================
+
+/// Encodes arbitrary binary data using a carrier.
+///
+/// This function allows hiding any binary data (files, images, etc.) within a carrier.
+/// The KAMO code produced is indistinguishable from text message encoding.
+///
+/// # Arguments
+/// * `carrier` - A generic carrier (must be binary for best results with binary data)
+/// * `data` - The binary data to encode
+/// * `passphrase` - Used for fragmentation, position selection, and encryption
+/// * `public_key` - Recipient's public key for asymmetric encryption
+///
+/// # Example
+/// ```ignore
+/// let carrier = Carrier::from_file(Path::new("video.mp4"))?;
+/// let secret_file = std::fs::read("secret.zip")?;
+/// let encoded = encode_bytes_with_carrier(&carrier, &secret_file, "pass", &pub_key)?;
+/// // encoded.code is the KAMO code - no indication it contains binary data
+/// ```
+pub fn encode_bytes_with_carrier(
+    carrier: &Carrier,
+    data: &[u8],
+    passphrase: &str,
+    public_key: &PublicKey,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_bytes_with_carrier_config(carrier, data, passphrase, public_key, &EncoderConfig::default())
+}
+
+/// Encodes binary data with custom configuration.
+pub fn encode_bytes_with_carrier_config(
+    carrier: &Carrier,
+    data: &[u8],
+    passphrase: &str,
+    public_key: &PublicKey,
+    config: &EncoderConfig,
+) -> Result<EncodedMessage, EncoderError> {
+    // Validate inputs
+    if data.is_empty() {
+        return Err(EncoderError::EmptyMessage);
+    }
+
+    if carrier.is_empty() {
+        return Err(EncoderError::EmptyCarrier);
+    }
+
+    // For binary data, we need a binary carrier for byte-level searching
+    match carrier {
+        Carrier::Binary(binary_carrier) => {
+            encode_bytes_binary_carrier(binary_carrier, data, passphrase, public_key, config)
+        }
+        Carrier::Text(text_carrier) => {
+            // Convert text carrier to binary for byte-level operations
+            // This allows using text files as carriers for binary messages too
+            let text_bytes = text_carrier.original.as_bytes().to_vec();
+            let binary_carrier = BinaryCarrierSearch::new(text_bytes);
+            encode_bytes_binary_carrier(&binary_carrier, data, passphrase, public_key, config)
+        }
+    }
+}
+
+/// Internal: encodes binary data using a binary carrier.
+fn encode_bytes_binary_carrier(
+    carrier: &BinaryCarrierSearch,
+    data: &[u8],
+    passphrase: &str,
+    public_key: &PublicKey,
+    config: &EncoderConfig,
+) -> Result<EncodedMessage, EncoderError> {
+    if config.verbose {
+        eprintln!("Binary carrier has {} bytes", carrier.len());
+        eprintln!("Message has {} bytes", data.len());
+    }
+
+    // Fragment the binary data
+    let fragments = fragment_bytes_for_carrier(data, carrier, passphrase);
+
+    if fragments.is_empty() && !data.is_empty() {
+        return Err(EncoderError::FragmentNotFound(
+            "Message bytes not found in binary carrier".to_string(),
+        ));
+    }
+
+    let real_count = fragments.len();
+
+    if config.verbose {
+        eprintln!("Fragmented into {} byte sequences", real_count);
+    }
+
+    // Find positions for each fragment
+    let mut found_fragments: Vec<FoundFragment> = Vec::with_capacity(real_count);
+
+    for (i, fragment) in fragments.iter().enumerate() {
+        let positions = carrier.find_all(&fragment.bytes);
+
+        if positions.is_empty() {
+            return Err(EncoderError::FragmentNotFound(format!(
+                "Byte sequence not found in carrier (fragment {})",
+                i
+            )));
+        }
+
+        let selected_pos =
+            select_distributed_position(&positions, passphrase, i).expect("positions is not empty");
+
+        if config.verbose {
+            eprintln!(
+                "Fragment {}: {} bytes found at {} positions, selected {}",
+                i,
+                fragment.bytes.len(),
+                positions.len(),
+                selected_pos
+            );
+        }
+
+        // For binary data, ends_word is always false (no word boundaries)
+        found_fragments.push(FoundFragment::new(
+            selected_pos,
+            fragment.bytes.len(),
+            vec![], // No space positions for binary
+        ));
+    }
+
+    // Pad with random carrier bytes
+    let current_size = data.len();
+    let target_size = calculate_padded_length(current_size);
+    let padding_fragments =
+        generate_padding_fragments_binary(carrier, passphrase, target_size.saturating_sub(current_size));
+
+    if config.verbose {
+        eprintln!("Added {} padding fragments", padding_fragments.len());
+    }
+
+    // Combine and encrypt
+    let mut all_fragments = found_fragments;
+    all_fragments.extend(padding_fragments);
+
+    let encoded_data = EncodedData {
+        version: VERSION,
+        real_count: real_count as u16,
+        fragments: all_fragments.clone(),
+    };
+
+    let serialized = bincode::serialize(&encoded_data)
+        .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
+
+    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let code = BASE64.encode(&encrypted);
+
+    Ok(EncodedMessage {
+        code,
+        real_fragment_count: real_count,
+        total_fragments: all_fragments.len(),
+    })
 }
 
 #[cfg(test)]

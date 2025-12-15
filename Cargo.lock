@@ -703,12 +703,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hound"
-version = "3.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
-
-[[package]]
 name = "image"
 version = "0.25.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "kamo"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "base45",
@@ -805,7 +799,6 @@ dependencies = [
  "clap",
  "flate2",
  "hkdf",
- "hound",
  "image",
  "qrcode",
  "rand 0.8.5",

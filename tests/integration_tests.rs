@@ -366,3 +366,138 @@ fn test_roundtrip_v5() {
     let msg_lower = decoded.message.to_lowercase();
     assert!(msg_lower.contains("ama") || msg_lower.contains("parque") || msg_lower.contains("flor"));
 }
+
+// ============================================================================
+// Binary Message Tests
+// ============================================================================
+
+use kamo::{
+    decode_bytes_with_carrier, encode_bytes_with_carrier, Carrier,
+};
+
+/// Test binary message encode/decode roundtrip
+#[test]
+fn test_binary_message_roundtrip() {
+    // Create a carrier with all byte values (ensures any byte can be found)
+    let mut carrier_data: Vec<u8> = Vec::new();
+    for i in 0..=255u8 {
+        carrier_data.push(i);
+    }
+    // Repeat for more occurrences
+    for i in 0..=255u8 {
+        carrier_data.push(i);
+    }
+    let carrier = Carrier::from_bytes(carrier_data);
+
+    // Binary message
+    let message: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
+    let passphrase = "test123";
+
+    let keypair = KeyPair::generate();
+
+    // Encode
+    let encoded = encode_bytes_with_carrier(&carrier, &message, passphrase, keypair.public_key())
+        .expect("Encoding should succeed");
+    assert!(!encoded.code.is_empty());
+
+    // Decode
+    let decoded = decode_bytes_with_carrier(&encoded.code, &carrier, passphrase, keypair.secret_key());
+
+    // Should get back the exact bytes
+    assert_eq!(decoded.data, message);
+}
+
+/// Test binary message with wrong passphrase returns garbage
+#[test]
+fn test_binary_wrong_passphrase_returns_garbage() {
+    let mut carrier_data: Vec<u8> = Vec::new();
+    for i in 0..=255u8 {
+        carrier_data.push(i);
+        carrier_data.push(i);
+    }
+    let carrier = Carrier::from_bytes(carrier_data);
+
+    let message: Vec<u8> = vec![0x41, 0x42, 0x43]; // "ABC"
+    let correct_passphrase = "correct";
+    let wrong_passphrase = "wrong";
+
+    let keypair = KeyPair::generate();
+
+    let encoded = encode_bytes_with_carrier(&carrier, &message, correct_passphrase, keypair.public_key())
+        .expect("Encoding should succeed");
+
+    // Decode with wrong passphrase
+    let decoded = decode_bytes_with_carrier(&encoded.code, &carrier, wrong_passphrase, keypair.secret_key());
+
+    // Should return something (garbage), not the original message
+    assert!(!decoded.data.is_empty());
+    // Garbage should be different from original
+    assert_ne!(decoded.data, message);
+}
+
+/// Test binary message encoding is indistinguishable from text encoding
+#[test]
+fn test_binary_code_indistinguishable() {
+    let mut carrier_data: Vec<u8> = Vec::new();
+    for i in 0..=255u8 {
+        carrier_data.push(i);
+    }
+    for i in 0..=255u8 {
+        carrier_data.push(i);
+    }
+    let carrier = Carrier::from_bytes(carrier_data);
+
+    let binary_message: Vec<u8> = vec![0x48, 0x65, 0x6C, 0x6C, 0x6F]; // "Hello" as bytes
+    let passphrase = "test";
+
+    let keypair = KeyPair::generate();
+
+    let binary_encoded = encode_bytes_with_carrier(&carrier, &binary_message, passphrase, keypair.public_key())
+        .expect("Binary encoding should succeed");
+
+    // The code should be valid base64 (just like text encoding)
+    let decode_result = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &binary_encoded.code,
+    );
+    assert!(decode_result.is_ok());
+
+    // There should be no metadata indicating this is binary
+    // (the code format is identical)
+    assert!(!binary_encoded.code.contains("binary"));
+    assert!(!binary_encoded.code.contains("BINARY"));
+}
+
+/// Test encoding a simulated file
+#[test]
+fn test_simulated_file_encoding() {
+    // Simulate a small "file" with header and data
+    let file_content: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47,  // PNG magic bytes
+        0x0D, 0x0A, 0x1A, 0x0A,  // PNG signature
+        0x00, 0x01, 0x02, 0x03,  // Some data
+    ];
+
+    // Create carrier with all possible bytes
+    let mut carrier_data: Vec<u8> = Vec::new();
+    for _ in 0..4 {
+        for i in 0..=255u8 {
+            carrier_data.push(i);
+        }
+    }
+    let carrier = Carrier::from_bytes(carrier_data);
+
+    let passphrase = "secret";
+    let keypair = KeyPair::generate();
+
+    // Encode the "file"
+    let encoded = encode_bytes_with_carrier(&carrier, &file_content, passphrase, keypair.public_key())
+        .expect("File encoding should succeed");
+
+    // Decode
+    let decoded = decode_bytes_with_carrier(&encoded.code, &carrier, passphrase, keypair.secret_key());
+
+    // Should recover exact bytes
+    assert_eq!(decoded.data, file_content);
+    assert_eq!(&decoded.data[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic
+}

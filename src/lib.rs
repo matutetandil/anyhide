@@ -1,17 +1,18 @@
 //! # KAMO - Key Asymmetric Message Obfuscation
 //!
-//! KAMO is a steganography tool that hides messages within pre-shared carrier text.
+//! KAMO is a steganography tool that hides messages within pre-shared carriers
+//! (text, images, or audio).
 //!
 //! ## Overview
 //!
-//! KAMO v0.4.1 uses a pre-shared carrier approach with enhanced security:
-//! - Both parties agree on a carrier text beforehand (a book, article, etc.)
+//! KAMO v0.5 uses a pre-shared carrier approach with enhanced security:
+//! - Both parties agree on a carrier beforehand (text, image, or audio file)
 //! - Message is **fragmented** into variable-sized pieces based on passphrase
-//! - Fragments are found as **substrings** in the carrier (case-insensitive)
+//! - Fragments are found as **substrings** (text) or **byte sequences** (binary)
 //! - Positions are **distributed** randomly across all occurrences
 //! - Message is **padded** to block boundaries to hide length
 //! - Positions are encrypted with passphrase (symmetric) and public key (asymmetric)
-//! - Only the encrypted code is transmitted
+//! - Only the encrypted code is transmitted (carrier never transmitted!)
 //!
 //! ## Security Model
 //!
@@ -21,6 +22,7 @@
 //! - **Never fails**: Wrong inputs return garbage, not error
 //! - **Block padding**: Message length hidden (only block range visible)
 //! - **Distributed selection**: Multiple occurrences = random selection
+//! - **Multi-carrier**: Text, PNG/BMP images, WAV audio all supported
 //!
 //! ## Example Usage
 //!
@@ -59,9 +61,10 @@
 //! ## Modules
 //!
 //! - [`crypto`]: Cryptographic operations (key generation, encryption)
-//! - [`text`]: Text processing (fragmentation, substring search, padding)
+//! - [`text`]: Text/carrier processing (fragmentation, substring search, padding)
 //! - [`encoder`]: Message encoding with fragments and padding
 //! - [`decoder`]: Message decoding (never fails)
+//! - [`qr`]: QR code generation and reading
 
 /// Protocol version
 pub const VERSION: u8 = 6;
@@ -76,12 +79,19 @@ pub mod crypto;
 pub mod decoder;
 pub mod encoder;
 pub mod qr;
-pub mod stego;
 pub mod text;
 
 // Re-export commonly used types at the crate root
 pub use crypto::KeyPair;
-pub use decoder::{decode, decode_with_config, DecodedMessage, DecoderConfig};
-pub use encoder::{encode, encode_with_config, EncodedData, EncodedMessage, EncoderConfig, EncoderError};
+pub use decoder::{
+    decode, decode_bytes_with_carrier, decode_bytes_with_carrier_config, decode_with_carrier,
+    decode_with_carrier_config, decode_with_config, DecodedBytes, DecodedMessage, DecoderConfig,
+};
+pub use encoder::{
+    encode, encode_bytes_with_carrier, encode_bytes_with_carrier_config, encode_with_carrier,
+    encode_with_carrier_config, encode_with_config, EncodedData, EncodedMessage, EncoderConfig,
+    EncoderError,
+};
 pub use qr::{decode_base45, encode_base45, generate_qr, read_qr, QrError, QrFormat};
+pub use text::carrier::{fragment_bytes_for_carrier, BinaryCarrierSearch, BinaryFragment, Carrier};
 pub use text::fragment::FoundFragment;

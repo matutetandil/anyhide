@@ -3,15 +3,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 
-KAMO is an advanced steganography tool that hides messages in **text, images, or audio** using hybrid encryption with forward secrecy. Unlike traditional steganography, carriers are pre-shared - only encrypted codes are transmitted.
+KAMO is an advanced steganography tool that hides messages in **any file** using hybrid encryption with forward secrecy. Unlike traditional steganography, carriers are pre-shared - only encrypted codes are transmitted.
 
 ## Overview
 
-KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
+KAMO v0.5.1 uses a **pre-shared carrier** approach with enhanced security:
 
-1. Both parties agree on a carrier text beforehand (a book chapter, news article, song lyrics, etc.)
+1. Both parties agree on a carrier file beforehand (ANY file: text, image, video, PDF, executable, etc.)
 2. Message is **fragmented** into variable-sized pieces based on passphrase
-3. Fragments are found as **substrings** in the carrier (e.g., "ama" in "Amanda")
+3. Fragments are found as **substrings** (text) or **byte sequences** (binary files)
 4. Positions are **randomly distributed** - not sequential (Fragment 1 can be at end, Fragment 5 at start)
 5. Message is **padded** to block boundaries to hide its length
 6. Positions are encrypted with passphrase (symmetric) + public key (asymmetric)
@@ -19,7 +19,8 @@ KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 
 ### Key Features
 
-- **Multi-Carrier Support**: Hide in text, images (PNG/BMP), or audio (WAV)
+- **Universal Carrier Support**: Use ANY file as carrier (text, images, audio, video, PDFs, executables, etc.)
+- **Binary Message Support**: Hide ANY data (text or binary files) inside carriers
 - **QR Code Support**: Generate/read QR codes with Base45 encoding for optimal capacity
 - **Forward Secrecy**: Ephemeral keys - compromised key doesn't expose past messages
 - **Message Compression**: DEFLATE compression allows longer messages
@@ -31,6 +32,7 @@ KAMO v0.5.0 uses a **pre-shared carrier** approach with enhanced security:
 - **Dual-layer Encryption**: Symmetric (passphrase) + Asymmetric (X25519)
 - **Never Fails**: Decoder ALWAYS returns something - never errors (prevents brute-force)
 - **Plausible Deniability**: Wrong carrier/passphrase = different message (not error)
+- **Indistinguishable Codes**: KAMO code reveals nothing about content type (text vs binary)
 - **Block Padding**: Message length hidden by padding to 256-char blocks
 - **Random Positions**: Fragments scattered throughout carrier (non-sequential)
 - **Fast Search**: Suffix array for O(m·log n) substring search
@@ -157,8 +159,9 @@ kamo keygen
   -o, --output <PATH>    Output path for keys (default: kamo)
 
 kamo encode
-  -c, --carrier <PATH>   Path to carrier file (pre-shared text)
-  -m, --message <MSG>    Message to encode (or reads from stdin)
+  -c, --carrier <PATH>   Path to carrier file (any file type)
+  -m, --message <MSG>    Text message to encode (mutually exclusive with --file)
+  -f, --file <PATH>      Binary file to encode (mutually exclusive with --message)
   -p, --passphrase <PASS> Passphrase for encryption
   -k, --key <PATH>       Path to recipient's public key
   -v, --verbose          Show positions found
@@ -168,23 +171,8 @@ kamo decode
   -c, --carrier <PATH>   Path to carrier file (same as encoding)
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
+  -o, --output <PATH>    Output file for decoded data (required for binary)
   -v, --verbose          Show positions and fragments
-
-kamo image-hide
-  -i, --image <PATH>     Path to cover image (PNG/BMP)
-  -d, --data <DATA>      Data to hide (or reads from stdin)
-  -o, --output <PATH>    Output path for stego image
-
-kamo image-extract
-  -i, --image <PATH>     Path to stego image
-
-kamo audio-hide
-  -a, --audio <PATH>     Path to cover audio (WAV 16-bit PCM)
-  -d, --data <DATA>      Data to hide (or reads from stdin)
-  -o, --output <PATH>    Output path for stego audio
-
-kamo audio-extract
-  -a, --audio <PATH>     Path to stego audio
 
 kamo multi-encrypt
   -m, --message <MSG>    Message to encrypt (or reads from stdin)
@@ -196,9 +184,6 @@ kamo multi-decrypt
   -i, --input <INPUT>    Encrypted data (base64 string or file path)
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
-
-kamo capacity
-  -f, --file <PATH>      Path to image or audio file
 
 kamo qr-generate
   -c, --code <CODE>      KAMO code (base64) - reads from stdin if not provided
@@ -249,39 +234,75 @@ Anyone intercepting "AxB2c3..." has no idea:
 - What carrier was used
 - What the message is
 
-## Example: Image Steganography
+## Example: Any Binary File as Carrier
 
-Hide encrypted data inside a PNG or BMP image:
-
-```bash
-# Check image capacity
-kamo capacity -f cover_photo.png
-# Output: Image capacity: 12500 bytes
-
-# Hide data in the image
-kamo image-hide -i cover_photo.png -d "Secret message" -o stego_photo.png
-
-# Extract hidden data
-kamo image-extract -i stego_photo.png
-# Output: Secret message
-```
-
-## Example: Audio Steganography
-
-Hide encrypted data inside a WAV audio file:
+Use ANY file as a pre-shared carrier (file is never modified):
 
 ```bash
-# Check audio capacity
-kamo capacity -f song.wav
-# Output: Audio capacity: 50000 bytes (10.5 seconds)
+# Both Alice and Bob have the same file - can be ANYTHING:
+# - An image (photo.png, image.jpg)
+# - A video (movie.mp4, clip.avi)
+# - A PDF document (report.pdf)
+# - An executable (program.exe)
+# - A compressed archive (data.zip)
+# - Any other file!
 
-# Hide data in audio
-kamo audio-hide -a song.wav -d "Secret message" -o stego_song.wav
+# Alice encodes using a shared PDF as carrier
+kamo encode -c shared_document.pdf -m "secret message" -p "passphrase" -k bob.pub
+# Output: AxB2c3F4... (KAMO code - the PDF is NOT modified)
 
-# Extract hidden data
-kamo audio-extract -a stego_song.wav
-# Output: Secret message
+# Bob decodes using the exact same PDF
+kamo decode --code "AxB2c3F4..." -c shared_document.pdf -p "passphrase" -k bob.key
+# Output: secret message
 ```
+
+For binary files, message fragments are searched as **byte sequences** within
+the raw bytes of the file. Larger files = more byte diversity = better success rate.
+
+## Example: Image Carrier
+
+```bash
+# Both parties have the same photo
+kamo encode -c vacation_photo.jpg -m "meeting at 5pm" -p "secret" -k bob.pub
+# Output: BxY4z5W6... (KAMO code)
+
+kamo decode --code "BxY4z5W6..." -c vacation_photo.jpg -p "secret" -k bob.key
+# Output: meeting at 5pm
+```
+
+## Example: Video/Audio Carrier
+
+```bash
+# Video files work great due to their size
+kamo encode -c shared_video.mp4 -m "coordinates: 40.7128, -74.0060" -p "pass" -k bob.pub
+
+# Audio files
+kamo encode -c song.wav -m "the eagle has landed" -p "pass" -k bob.pub
+```
+
+## Example: Hide Binary Files
+
+Hide ANY file (zip, image, executable, etc.) inside a carrier. The KAMO code
+reveals nothing about whether the content is text or binary.
+
+```bash
+# Alice hides a secret.zip inside a shared video
+kamo encode -c shared_video.mp4 --file secret.zip -p "pass" -k bob.pub
+# Output: BxY4z5W6... (KAMO code - indistinguishable from text encoding)
+
+# Bob extracts the file using -o to write raw bytes
+kamo decode --code "BxY4z5W6..." -c shared_video.mp4 -p "pass" -k bob.key -o secret.zip
+# Output: Decoded 15234 bytes to secret.zip
+
+# Works with any binary data:
+kamo encode -c carrier.bin --file confidential.pdf -p "pass" -k bob.pub
+kamo encode -c movie.mp4 --file keys.tar.gz -p "pass" -k bob.pub
+kamo encode -c image.png --file database.sqlite -p "pass" -k bob.pub
+```
+
+**Security Note:** The KAMO code format is identical for text and binary messages.
+An attacker cannot determine if the hidden content is "hello world" or a 10MB file
+just by looking at the code.
 
 ## Example: Multi-Recipient Encryption
 
@@ -337,15 +358,12 @@ kamo/
 │   │   └── multi_recipient.rs # Multi-recipient encryption
 │   ├── text/
 │   │   ├── mod.rs
+│   │   ├── carrier.rs       # Universal carrier abstraction (text/binary)
 │   │   ├── permute.rs       # Carrier permutation, distributed selection
 │   │   ├── padding.rs       # Block padding
 │   │   ├── fragment.rs      # Adaptive message fragmentation
 │   │   ├── tokenize.rs      # Carrier search utilities
 │   │   └── suffix_array.rs  # O(m·log n) substring search
-│   ├── stego/
-│   │   ├── mod.rs
-│   │   ├── image.rs         # LSB steganography for PNG/BMP
-│   │   └── audio.rs         # LSB steganography for WAV
 │   ├── qr/
 │   │   ├── mod.rs           # Base45 encoding for QR codes
 │   │   ├── generator.rs     # QR code generation (PNG/SVG/ASCII)
@@ -410,4 +428,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.5.0 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.5.1 (see [CHANGELOG.md](CHANGELOG.md))

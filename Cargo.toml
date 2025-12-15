@@ -1,8 +1,8 @@
 [package]
 name = "kamo"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
-description = "Advanced steganography with compression, forward secrecy, multi-recipient, and image/audio carriers"
+description = "Advanced steganography with compression, forward secrecy, and universal carrier support"
 license = "MIT"
 authors = ["KAMO Contributors"]
 repository = "https://github.com/kamo-project/kamo"
@@ -26,9 +26,8 @@ serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 base64 = "0.22"
 
-# Image/Audio steganography
+# QR code image processing
 image = "0.25"
-hound = "3.5"
 
 # QR code generation and reading
 base45 = "3.1"

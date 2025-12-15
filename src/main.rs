@@ -1,11 +1,10 @@
 //! KAMO - Key Asymmetric Message Obfuscation
 //!
 //! A CLI tool for advanced steganography with hybrid encryption.
-//! Version 0.5.0 features compression, forward secrecy, and multi-carrier support.
+//! Uses pre-shared carriers (any file) - only KAMO codes are transmitted.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use image::GenericImageView;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
@@ -13,16 +12,17 @@ use kamo::crypto::{
     decrypt_multi, encrypt_multi, load_public_key, load_secret_key, KeyPair, MultiRecipientData,
 };
 use kamo::qr::{generate_qr_to_file, qr_capacity_info, read_qr_from_file, QrConfig, QrFormat};
-use kamo::stego::{AudioStego, ImageStego};
-use kamo::{decode_with_config, encode_with_config, DecoderConfig, EncoderConfig};
+use kamo::{
+    decode_with_carrier_config, encode_with_carrier_config, Carrier, DecoderConfig, EncoderConfig,
+};
 
 /// KAMO - Key Asymmetric Message Obfuscation
 ///
-/// Advanced steganography with compression, forward secrecy, and multi-carrier support.
-/// Supports text, image (PNG/BMP), and audio (WAV) carriers.
+/// Advanced steganography with compression, forward secrecy, and universal carrier support.
+/// Use ANY file as a pre-shared carrier - only encrypted KAMO codes are transmitted.
 #[derive(Parser)]
 #[command(name = "kamo")]
-#[command(version = "0.5.0")]
+#[command(version = "0.5.1")]
 #[command(about = "Advanced steganography with compression, forward secrecy, and multi-carrier support")]
 #[command(long_about = None)]
 struct Cli {
@@ -39,15 +39,27 @@ enum Commands {
         output: PathBuf,
     },
 
-    /// Encode a message using a pre-shared text carrier
+    /// Encode a message using a pre-shared carrier (ANY file)
+    ///
+    /// The carrier can be ANY file:
+    /// - Text files (.txt, .md, .csv, .json, .xml, .html) - substring matching
+    /// - Any other file (images, audio, video, PDFs, executables, etc.) - byte-sequence matching
+    ///
+    /// Output is always a KAMO code (base64) - the carrier is NEVER modified.
+    /// The KAMO code does NOT reveal whether the hidden data is text or binary.
     Encode {
-        /// Path to the carrier file (pre-shared text)
+        /// Path to carrier file (any file - text uses substring matching, others use byte matching)
         #[arg(short, long)]
         carrier: PathBuf,
 
-        /// Message to encode (reads from stdin if not provided)
-        #[arg(short, long)]
+        /// Text message to encode (mutually exclusive with --file)
+        #[arg(short, long, conflicts_with = "file")]
         message: Option<String>,
+
+        /// Binary file to encode (mutually exclusive with --message)
+        /// Use this to hide any file (zip, image, executable, etc.) inside the carrier
+        #[arg(short, long, conflicts_with = "message")]
+        file: Option<PathBuf>,
 
         /// Passphrase for encryption (also determines fragmentation and positions)
         #[arg(short, long)]
@@ -57,19 +69,24 @@ enum Commands {
         #[arg(short, long)]
         key: PathBuf,
 
-        /// Verbose output (shows permutation and positions)
+        /// Verbose output (shows fragmentation and positions)
         #[arg(short, long)]
         verbose: bool,
     },
 
-    /// Decode a message using a pre-shared text carrier
-    /// NOTE: This command NEVER fails - it returns garbage if inputs are wrong
+    /// Decode a message using a pre-shared carrier (ANY file)
+    ///
+    /// NOTE: This command NEVER fails - it returns garbage if inputs are wrong.
+    /// This provides plausible deniability.
+    ///
+    /// Use -o/--output to write raw bytes to a file (required for binary data).
+    /// Without -o, output is printed as text (lossy UTF-8 conversion).
     Decode {
         /// The encrypted code to decode
         #[arg(long)]
         code: String,
 
-        /// Path to the carrier file (must match encoding carrier)
+        /// Path to carrier file (must be the EXACT same file used for encoding)
         #[arg(short, long)]
         carrier: PathBuf,
 
@@ -81,89 +98,14 @@ enum Commands {
         #[arg(short, long)]
         key: PathBuf,
 
-        /// Verbose output (shows extracted words)
+        /// Output file for decoded data (required for binary data)
+        /// If not specified, prints decoded text to stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Verbose output (shows extracted fragments)
         #[arg(short, long)]
         verbose: bool,
-    },
-
-    /// Hide data in an image (LSB steganography)
-    #[command(name = "image-hide")]
-    ImageHide {
-        /// Input image (PNG or BMP)
-        #[arg(short, long)]
-        input: PathBuf,
-
-        /// Output image path
-        #[arg(short, long)]
-        output: PathBuf,
-
-        /// Data to hide (reads from stdin if not provided)
-        #[arg(short, long)]
-        data: Option<String>,
-
-        /// Passphrase for encryption
-        #[arg(short, long)]
-        passphrase: String,
-
-        /// Path to recipient's public key
-        #[arg(short, long)]
-        key: PathBuf,
-    },
-
-    /// Extract hidden data from an image
-    #[command(name = "image-extract")]
-    ImageExtract {
-        /// Input image with hidden data
-        #[arg(short, long)]
-        input: PathBuf,
-
-        /// Passphrase for decryption
-        #[arg(short, long)]
-        passphrase: String,
-
-        /// Path to your private key
-        #[arg(short, long)]
-        key: PathBuf,
-    },
-
-    /// Hide data in an audio file (LSB steganography)
-    #[command(name = "audio-hide")]
-    AudioHide {
-        /// Input audio file (WAV, 16-bit PCM)
-        #[arg(short, long)]
-        input: PathBuf,
-
-        /// Output audio path
-        #[arg(short, long)]
-        output: PathBuf,
-
-        /// Data to hide (reads from stdin if not provided)
-        #[arg(short, long)]
-        data: Option<String>,
-
-        /// Passphrase for encryption
-        #[arg(short, long)]
-        passphrase: String,
-
-        /// Path to recipient's public key
-        #[arg(short, long)]
-        key: PathBuf,
-    },
-
-    /// Extract hidden data from an audio file
-    #[command(name = "audio-extract")]
-    AudioExtract {
-        /// Input audio with hidden data
-        #[arg(short, long)]
-        input: PathBuf,
-
-        /// Passphrase for decryption
-        #[arg(short, long)]
-        passphrase: String,
-
-        /// Path to your private key
-        #[arg(short, long)]
-        key: PathBuf,
     },
 
     /// Encrypt a message for multiple recipients
@@ -200,13 +142,6 @@ enum Commands {
         /// Path to your private key
         #[arg(short, long)]
         key: PathBuf,
-    },
-
-    /// Show capacity of an image or audio file for hiding data
-    Capacity {
-        /// Path to image or audio file
-        #[arg(short, long)]
-        file: PathBuf,
     },
 
     /// Generate a QR code from a KAMO code (uses Base45 for optimal capacity)
@@ -259,46 +194,20 @@ fn main() -> Result<()> {
         Commands::Encode {
             carrier,
             message,
+            file,
             passphrase,
             key,
             verbose,
-        } => encode_cmd(&carrier, message, &passphrase, &key, verbose)?,
+        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose)?,
 
         Commands::Decode {
             code,
             carrier,
             passphrase,
             key,
+            output,
             verbose,
-        } => decode_cmd(&code, &carrier, &passphrase, &key, verbose),
-
-        Commands::ImageHide {
-            input,
-            output,
-            data,
-            passphrase,
-            key,
-        } => image_hide(&input, &output, data, &passphrase, &key)?,
-
-        Commands::ImageExtract {
-            input,
-            passphrase,
-            key,
-        } => image_extract(&input, &passphrase, &key)?,
-
-        Commands::AudioHide {
-            input,
-            output,
-            data,
-            passphrase,
-            key,
-        } => audio_hide(&input, &output, data, &passphrase, &key)?,
-
-        Commands::AudioExtract {
-            input,
-            passphrase,
-            key,
-        } => audio_extract(&input, &passphrase, &key)?,
+        } => decode_cmd(&code, &carrier, &passphrase, &key, output.as_ref(), verbose),
 
         Commands::MultiEncrypt {
             message,
@@ -312,8 +221,6 @@ fn main() -> Result<()> {
             passphrase,
             key,
         } => multi_decrypt(&input, &passphrase, &key)?,
-
-        Commands::Capacity { file } => show_capacity(&file)?,
 
         Commands::QrGenerate {
             code,
@@ -350,31 +257,24 @@ fn keygen(output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Encodes a message into an encrypted code.
+/// Encodes a message or file into an encrypted code.
+/// Supports text messages (--message) or binary files (--file).
+/// Carrier type is auto-detected by extension.
 fn encode_cmd(
     carrier_path: &PathBuf,
     message: Option<String>,
+    file: Option<&PathBuf>,
     passphrase: &str,
     key_path: &PathBuf,
     verbose: bool,
 ) -> Result<()> {
-    let carrier = std::fs::read_to_string(carrier_path)
+    // Load carrier with auto-detection based on file extension
+    let carrier = Carrier::from_file(carrier_path)
         .with_context(|| format!("Failed to read carrier from {}", carrier_path.display()))?;
 
-    let message = match message {
-        Some(m) => m,
-        None => {
-            eprintln!("Reading message from stdin (Ctrl+D to finish):");
-            let mut buffer = String::new();
-            io::stdin()
-                .read_to_string(&mut buffer)
-                .context("Failed to read message from stdin")?;
-            buffer.trim().to_string()
-        }
-    };
-
-    if message.is_empty() {
-        anyhow::bail!("Message cannot be empty");
+    let carrier_type = if carrier.is_binary() { "binary" } else { "text" };
+    if verbose {
+        eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
     }
 
     let public_key = load_public_key(key_path)
@@ -382,8 +282,47 @@ fn encode_cmd(
 
     let config = EncoderConfig { verbose };
 
-    let encoded = encode_with_config(&carrier, &message, passphrase, &public_key, &config)
-        .context("Failed to encode message")?;
+    // Determine if we're encoding text or binary
+    let encoded = if let Some(file_path) = file {
+        // Binary file encoding
+        let data = std::fs::read(file_path)
+            .with_context(|| format!("Failed to read file {}", file_path.display()))?;
+
+        if data.is_empty() {
+            anyhow::bail!("File is empty");
+        }
+
+        if verbose {
+            eprintln!("Encoding binary file: {} ({} bytes)", file_path.display(), data.len());
+        }
+
+        kamo::encode_bytes_with_carrier_config(&carrier, &data, passphrase, &public_key, &config)
+            .context("Failed to encode file")?
+    } else {
+        // Text message encoding
+        let message = match message {
+            Some(m) => m,
+            None => {
+                eprintln!("Reading message from stdin (Ctrl+D to finish):");
+                let mut buffer = String::new();
+                io::stdin()
+                    .read_to_string(&mut buffer)
+                    .context("Failed to read message from stdin")?;
+                buffer.trim().to_string()
+            }
+        };
+
+        if message.is_empty() {
+            anyhow::bail!("Message cannot be empty");
+        }
+
+        if verbose {
+            eprintln!("Encoding text message ({} chars)", message.len());
+        }
+
+        encode_with_carrier_config(&carrier, &message, passphrase, &public_key, &config)
+            .context("Failed to encode message")?
+    };
 
     println!("{}", encoded.code);
 
@@ -398,15 +337,32 @@ fn encode_cmd(
     Ok(())
 }
 
-/// Decodes an encrypted code back to a message.
-fn decode_cmd(code: &str, carrier_path: &PathBuf, passphrase: &str, key_path: &PathBuf, verbose: bool) {
-    let carrier = match std::fs::read_to_string(carrier_path) {
+/// Decodes an encrypted code back to a message or file.
+/// Use -o/--output to write raw bytes to a file (required for binary data).
+/// Without -o, output is printed as text.
+/// NEVER fails - returns garbage if inputs are wrong (plausible deniability).
+fn decode_cmd(
+    code: &str,
+    carrier_path: &PathBuf,
+    passphrase: &str,
+    key_path: &PathBuf,
+    output: Option<&PathBuf>,
+    verbose: bool,
+) {
+    // Load carrier with auto-detection based on file extension
+    let carrier = match Carrier::from_file(carrier_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Warning: Could not read carrier file: {}", e);
-            String::new()
+            // Create an empty text carrier for fallback
+            Carrier::from_text("")
         }
     };
+
+    let carrier_type = if carrier.is_binary() { "binary" } else { "text" };
+    if verbose {
+        eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
+    }
 
     let secret_key = match load_secret_key(key_path) {
         Ok(k) => k,
@@ -417,178 +373,35 @@ fn decode_cmd(code: &str, carrier_path: &PathBuf, passphrase: &str, key_path: &P
     };
 
     let config = DecoderConfig { verbose };
-    let decoded = decode_with_config(code, &carrier, passphrase, &secret_key, &config);
 
-    println!("{}", decoded.message);
+    // If output file is specified, decode as binary
+    if let Some(output_path) = output {
+        let decoded = kamo::decode_bytes_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
 
-    if verbose {
-        eprintln!();
-        eprintln!("Fragments: {:?}", decoded.fragments);
-    }
-}
-
-/// Hides data in an image using LSB steganography.
-fn image_hide(
-    input: &PathBuf,
-    output: &PathBuf,
-    data: Option<String>,
-    passphrase: &str,
-    key_path: &PathBuf,
-) -> Result<()> {
-    let stego = ImageStego::from_file(input)
-        .with_context(|| format!("Failed to load image from {}", input.display()))?;
-
-    let data = match data {
-        Some(d) => d,
-        None => {
-            eprintln!("Reading data from stdin (Ctrl+D to finish):");
-            let mut buffer = String::new();
-            io::stdin()
-                .read_to_string(&mut buffer)
-                .context("Failed to read data from stdin")?;
-            buffer.trim().to_string()
+        match std::fs::write(output_path, &decoded.data) {
+            Ok(_) => {
+                eprintln!("Decoded {} bytes to {}", decoded.data.len(), output_path.display());
+            }
+            Err(e) => {
+                eprintln!("Failed to write output file: {}", e);
+            }
         }
-    };
 
-    if data.is_empty() {
-        anyhow::bail!("Data cannot be empty");
-    }
-
-    let public_key = load_public_key(key_path)
-        .with_context(|| format!("Failed to load public key from {}", key_path.display()))?;
-
-    // Encrypt the data
-    let encrypted = kamo::crypto::encrypt_with_passphrase(data.as_bytes(), passphrase, &public_key)
-        .context("Failed to encrypt data")?;
-
-    // Check capacity
-    if encrypted.len() > stego.capacity() {
-        anyhow::bail!(
-            "Data too large: {} bytes encrypted, image can hold {} bytes",
-            encrypted.len(),
-            stego.capacity()
-        );
-    }
-
-    // Hide in image
-    let result = stego.hide(&encrypted).context("Failed to hide data in image")?;
-
-    // Save
-    let stego_result = ImageStego::from_image(result);
-    stego_result
-        .save(output)
-        .with_context(|| format!("Failed to save image to {}", output.display()))?;
-
-    println!("Data hidden successfully in {}", output.display());
-    println!("  Original message: {} bytes", data.len());
-    println!("  Encrypted size: {} bytes", encrypted.len());
-    println!("  Image capacity: {} bytes", stego.capacity());
-
-    Ok(())
-}
-
-/// Extracts hidden data from an image.
-fn image_extract(input: &PathBuf, passphrase: &str, key_path: &PathBuf) -> Result<()> {
-    let stego = ImageStego::from_file(input)
-        .with_context(|| format!("Failed to load image from {}", input.display()))?;
-
-    let secret_key = load_secret_key(key_path)
-        .with_context(|| format!("Failed to load private key from {}", key_path.display()))?;
-
-    // Extract encrypted data
-    let encrypted = stego.extract().context("Failed to extract data from image")?;
-
-    // Decrypt
-    let decrypted = kamo::crypto::decrypt_with_passphrase(&encrypted, passphrase, &secret_key)
-        .context("Failed to decrypt data")?;
-
-    // Output as string
-    let message = String::from_utf8_lossy(&decrypted);
-    println!("{}", message);
-
-    Ok(())
-}
-
-/// Hides data in an audio file using LSB steganography.
-fn audio_hide(
-    input: &PathBuf,
-    output: &PathBuf,
-    data: Option<String>,
-    passphrase: &str,
-    key_path: &PathBuf,
-) -> Result<()> {
-    let stego = AudioStego::from_file(input)
-        .with_context(|| format!("Failed to load audio from {}", input.display()))?;
-
-    let data = match data {
-        Some(d) => d,
-        None => {
-            eprintln!("Reading data from stdin (Ctrl+D to finish):");
-            let mut buffer = String::new();
-            io::stdin()
-                .read_to_string(&mut buffer)
-                .context("Failed to read data from stdin")?;
-            buffer.trim().to_string()
+        if verbose {
+            eprintln!();
+            eprintln!("Byte fragments: {} fragments", decoded.fragments.len());
         }
-    };
+    } else {
+        // Decode as text
+        let decoded = decode_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
 
-    if data.is_empty() {
-        anyhow::bail!("Data cannot be empty");
+        println!("{}", decoded.message);
+
+        if verbose {
+            eprintln!();
+            eprintln!("Fragments: {:?}", decoded.fragments);
+        }
     }
-
-    let public_key = load_public_key(key_path)
-        .with_context(|| format!("Failed to load public key from {}", key_path.display()))?;
-
-    // Encrypt the data
-    let encrypted = kamo::crypto::encrypt_with_passphrase(data.as_bytes(), passphrase, &public_key)
-        .context("Failed to encrypt data")?;
-
-    // Check capacity
-    if encrypted.len() > stego.capacity() {
-        anyhow::bail!(
-            "Data too large: {} bytes encrypted, audio can hold {} bytes",
-            encrypted.len(),
-            stego.capacity()
-        );
-    }
-
-    // Hide in audio
-    let result = stego.hide(&encrypted).context("Failed to hide data in audio")?;
-
-    // Save
-    result
-        .save(output)
-        .with_context(|| format!("Failed to save audio to {}", output.display()))?;
-
-    println!("Data hidden successfully in {}", output.display());
-    println!("  Original message: {} bytes", data.len());
-    println!("  Encrypted size: {} bytes", encrypted.len());
-    println!("  Audio capacity: {} bytes", stego.capacity());
-    println!("  Audio duration: {:.2} seconds", stego.duration_secs());
-
-    Ok(())
-}
-
-/// Extracts hidden data from an audio file.
-fn audio_extract(input: &PathBuf, passphrase: &str, key_path: &PathBuf) -> Result<()> {
-    let stego = AudioStego::from_file(input)
-        .with_context(|| format!("Failed to load audio from {}", input.display()))?;
-
-    let secret_key = load_secret_key(key_path)
-        .with_context(|| format!("Failed to load private key from {}", key_path.display()))?;
-
-    // Extract encrypted data
-    let encrypted = stego.extract().context("Failed to extract data from audio")?;
-
-    // Decrypt
-    let decrypted = kamo::crypto::decrypt_with_passphrase(&encrypted, passphrase, &secret_key)
-        .context("Failed to decrypt data")?;
-
-    // Output as string
-    let message = String::from_utf8_lossy(&decrypted);
-    println!("{}", message);
-
-    Ok(())
 }
 
 /// Encrypts a message for multiple recipients.
@@ -677,52 +490,6 @@ fn multi_decrypt(input: &str, passphrase: &str, key_path: &PathBuf) -> Result<()
     // Output as string
     let message = String::from_utf8_lossy(&decrypted);
     println!("{}", message);
-
-    Ok(())
-}
-
-/// Shows the capacity of an image or audio file.
-fn show_capacity(file: &PathBuf) -> Result<()> {
-    let extension = file
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    match extension.as_str() {
-        "png" | "bmp" | "jpg" | "jpeg" | "gif" => {
-            let stego = ImageStego::from_file(file)
-                .with_context(|| format!("Failed to load image from {}", file.display()))?;
-
-            let (width, height) = stego.image().dimensions();
-            println!("Image: {}", file.display());
-            println!("  Dimensions: {}x{}", width, height);
-            println!("  Capacity: {} bytes", stego.capacity());
-            println!(
-                "  Can hide approximately {} characters of text",
-                stego.capacity()
-            );
-        }
-        "wav" => {
-            let stego = AudioStego::from_file(file)
-                .with_context(|| format!("Failed to load audio from {}", file.display()))?;
-
-            println!("Audio: {}", file.display());
-            println!("  Duration: {:.2} seconds", stego.duration_secs());
-            println!("  Samples: {}", stego.sample_count());
-            println!("  Capacity: {} bytes", stego.capacity());
-            println!(
-                "  Can hide approximately {} characters of text",
-                stego.capacity()
-            );
-        }
-        _ => {
-            anyhow::bail!(
-                "Unsupported file type: {}. Supported: PNG, BMP, WAV",
-                extension
-            );
-        }
-    }
 
     Ok(())
 }

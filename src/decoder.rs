@@ -1,15 +1,17 @@
-//! Message decoding for KAMO v0.4.1 steganography.
+//! Message decoding for KAMO v0.5 steganography.
 //!
 //! This module orchestrates the decoding process:
 //! 1. Decode base64 and decrypt
 //! 2. Deserialize to get fragment data
 //! 3. Extract only real_count fragments (ignore padding)
-//! 4. Look up characters from carrier at each position
+//! 4. Look up data from carrier at each position (text or binary)
 //! 5. Reconstruct message with spaces
 //!
 //! CRITICAL: This decoder NEVER returns an error. If decryption fails or
 //! data is invalid, it generates pseudo-random output based on the inputs.
 //! This prevents brute-force attacks and provides plausible deniability.
+//!
+//! Supports both text carriers (text files, articles) and binary carriers (images, audio).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use sha2::{Digest, Sha256};
@@ -17,6 +19,7 @@ use x25519_dalek::StaticSecret;
 
 use crate::crypto::decrypt_with_passphrase;
 use crate::encoder::EncodedData;
+use crate::text::carrier::{Carrier, BinaryCarrierSearch};
 use crate::text::tokenize::CarrierSearch;
 use crate::VERSION;
 
@@ -28,6 +31,16 @@ pub struct DecodedMessage {
     pub message: String,
     /// The individual fragments extracted.
     pub fragments: Vec<String>,
+}
+
+/// Result of decoding binary data.
+/// Note: This is ALWAYS returned, even with invalid inputs.
+#[derive(Debug, Clone)]
+pub struct DecodedBytes {
+    /// The reconstructed binary data.
+    pub data: Vec<u8>,
+    /// The individual byte fragments extracted.
+    pub fragments: Vec<Vec<u8>>,
 }
 
 /// Configuration for the decoder.
@@ -247,6 +260,527 @@ fn generate_fallback_from_carrier(
     let message = fragments.join(" ");
 
     DecodedMessage { message, fragments }
+}
+
+// ============================================================================
+// Generic Carrier Support (Text + Binary)
+// ============================================================================
+
+/// Decodes using a generic carrier (text or binary).
+///
+/// This is the main entry point for decoding with any carrier type.
+/// NEVER fails - always returns something.
+///
+/// # Arguments
+/// * `code` - The base64-encoded encrypted code
+/// * `carrier` - A generic carrier (text or binary)
+/// * `passphrase` - Symmetric decryption passphrase
+/// * `secret_key` - Recipient's private key for asymmetric decryption
+pub fn decode_with_carrier(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+) -> DecodedMessage {
+    decode_with_carrier_config(code, carrier, passphrase, secret_key, &DecoderConfig::default())
+}
+
+/// Decodes with a generic carrier and custom configuration.
+/// NEVER returns an error - always produces output.
+pub fn decode_with_carrier_config(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig,
+) -> DecodedMessage {
+    match carrier {
+        Carrier::Text(text_carrier) => {
+            decode_text_carrier(code, text_carrier, passphrase, secret_key, config)
+        }
+        Carrier::Binary(binary_carrier) => {
+            decode_binary_carrier(code, binary_carrier, passphrase, secret_key, config)
+        }
+    }
+}
+
+/// Decodes using a text carrier (internal).
+fn decode_text_carrier(
+    code: &str,
+    carrier: &CarrierSearch,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig,
+) -> DecodedMessage {
+    if carrier.is_empty() {
+        return generate_fallback_output(code, passphrase, "empty_carrier");
+    }
+
+    // Step 1: Decode base64
+    let encrypted = match BASE64.decode(code.trim()) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Base64 decode failed, generating fallback");
+            }
+            return generate_fallback_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decoded {} bytes from base64", encrypted.len());
+    }
+
+    // Step 2: Decrypt
+    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Decryption failed, generating fallback");
+            }
+            return generate_fallback_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decrypted {} bytes", decrypted.len());
+    }
+
+    // Step 3: Deserialize
+    let data: EncodedData = match bincode::deserialize(&decrypted) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Deserialization failed, generating fallback");
+            }
+            return generate_fallback_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!(
+            "Deserialized: version={}, real_count={}, total_fragments={}",
+            data.version, data.real_count, data.fragments.len()
+        );
+    }
+
+    // Step 4: Version check (soft)
+    if data.version != VERSION && config.verbose {
+        eprintln!(
+            "Version mismatch: expected {}, got {}. Attempting anyway.",
+            VERSION, data.version
+        );
+    }
+
+    // Step 5: Extract real fragments
+    let real_count = data.real_count as usize;
+    if real_count > data.fragments.len() {
+        if config.verbose {
+            eprintln!("Invalid real_count, generating fallback");
+        }
+        return generate_fallback_from_carrier(code, passphrase, carrier);
+    }
+
+    let real_fragments = &data.fragments[..real_count];
+
+    // Step 6: Extract text from carrier
+    let mut extracted_fragments: Vec<String> = Vec::with_capacity(real_count);
+    let mut message_parts: Vec<String> = Vec::with_capacity(real_count);
+
+    for found in real_fragments {
+        let extracted = carrier.extract_wrapped(
+            found.position as usize,
+            found.length as usize,
+        );
+
+        extracted_fragments.push(extracted.clone());
+
+        let mut part = extracted;
+        if !found.space_positions.is_empty() {
+            part.push(' ');
+        }
+
+        message_parts.push(part);
+    }
+
+    if config.verbose {
+        eprintln!("Extracted {} fragments: {:?}", extracted_fragments.len(), extracted_fragments);
+    }
+
+    let message = message_parts.concat();
+
+    DecodedMessage {
+        message,
+        fragments: extracted_fragments,
+    }
+}
+
+/// Decodes using a binary carrier.
+fn decode_binary_carrier(
+    code: &str,
+    carrier: &BinaryCarrierSearch,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig,
+) -> DecodedMessage {
+    if carrier.is_empty() {
+        return generate_fallback_output(code, passphrase, "empty_binary_carrier");
+    }
+
+    // Step 1: Decode base64
+    let encrypted = match BASE64.decode(code.trim()) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Base64 decode failed, generating fallback");
+            }
+            return generate_fallback_from_binary_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decoded {} bytes from base64", encrypted.len());
+    }
+
+    // Step 2: Decrypt
+    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Decryption failed, generating fallback");
+            }
+            return generate_fallback_from_binary_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decrypted {} bytes", decrypted.len());
+    }
+
+    // Step 3: Deserialize
+    let data: EncodedData = match bincode::deserialize(&decrypted) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Deserialization failed, generating fallback");
+            }
+            return generate_fallback_from_binary_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!(
+            "Deserialized: version={}, real_count={}, total_fragments={}",
+            data.version, data.real_count, data.fragments.len()
+        );
+    }
+
+    // Step 4: Version check (soft)
+    if data.version != VERSION && config.verbose {
+        eprintln!(
+            "Version mismatch: expected {}, got {}. Attempting anyway.",
+            VERSION, data.version
+        );
+    }
+
+    // Step 5: Extract real fragments
+    let real_count = data.real_count as usize;
+    if real_count > data.fragments.len() {
+        if config.verbose {
+            eprintln!("Invalid real_count, generating fallback");
+        }
+        return generate_fallback_from_binary_carrier(code, passphrase, carrier);
+    }
+
+    let real_fragments = &data.fragments[..real_count];
+
+    // Step 6: Extract bytes from carrier and convert to string
+    let mut extracted_fragments: Vec<String> = Vec::with_capacity(real_count);
+    let mut message_parts: Vec<String> = Vec::with_capacity(real_count);
+
+    for found in real_fragments {
+        let bytes = carrier.extract_wrapped(
+            found.position as usize,
+            found.length as usize,
+        );
+
+        // Try to convert bytes to UTF-8 string
+        let extracted = String::from_utf8_lossy(&bytes).to_string();
+        extracted_fragments.push(extracted.clone());
+
+        let mut part = extracted;
+        if !found.space_positions.is_empty() {
+            part.push(' ');
+        }
+
+        message_parts.push(part);
+    }
+
+    if config.verbose {
+        eprintln!("Extracted {} fragments: {:?}", extracted_fragments.len(), extracted_fragments);
+    }
+
+    let message = message_parts.concat();
+
+    DecodedMessage {
+        message,
+        fragments: extracted_fragments,
+    }
+}
+
+/// Generates fallback by extracting pseudo-random bytes from binary carrier.
+fn generate_fallback_from_binary_carrier(
+    code: &str,
+    passphrase: &str,
+    carrier: &BinaryCarrierSearch,
+) -> DecodedMessage {
+    let mut hasher = Sha256::new();
+    hasher.update(code.as_bytes());
+    hasher.update(passphrase.as_bytes());
+    let hash = hasher.finalize();
+
+    if carrier.is_empty() {
+        return generate_fallback_output(code, passphrase, "empty_binary_carrier_fallback");
+    }
+
+    let carrier_len = carrier.len();
+
+    // Extract 3-8 fragments based on hash
+    let num_fragments = 3 + (hash[0] as usize % 6);
+    let mut fragments: Vec<String> = Vec::with_capacity(num_fragments);
+
+    for i in 0..num_fragments {
+        // Derive position from hash
+        let pos_bytes = [hash[i * 4], hash[i * 4 + 1], hash[i * 4 + 2], hash[i * 4 + 3]];
+        let pos = u32::from_le_bytes(pos_bytes) as usize % carrier_len;
+
+        // Random length 1-5
+        let len = 1 + (hash[(i * 4 + 1) % 32] as usize % 5);
+
+        let bytes = carrier.extract_wrapped(pos, len);
+        let extracted = String::from_utf8_lossy(&bytes).to_string();
+        fragments.push(extracted);
+    }
+
+    let message = fragments.join(" ");
+
+    DecodedMessage { message, fragments }
+}
+
+// ============================================================================
+// Binary Message Decoding (for extracting arbitrary bytes, not just text)
+// ============================================================================
+
+/// Decodes arbitrary binary data from a carrier.
+///
+/// This function extracts raw bytes - use this when the original message was binary data.
+/// NEVER fails - always returns something.
+///
+/// # Arguments
+/// * `code` - The base64-encoded encrypted code
+/// * `carrier` - A generic carrier (must match what was used for encoding)
+/// * `passphrase` - Symmetric decryption passphrase
+/// * `secret_key` - Recipient's private key for asymmetric decryption
+///
+/// # Example
+/// ```ignore
+/// let carrier = Carrier::from_file(Path::new("video.mp4"))?;
+/// let decoded = decode_bytes_with_carrier(&code, &carrier, "pass", &secret_key);
+/// std::fs::write("secret.zip", &decoded.data)?;
+/// ```
+pub fn decode_bytes_with_carrier(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+) -> DecodedBytes {
+    decode_bytes_with_carrier_config(code, carrier, passphrase, secret_key, &DecoderConfig::default())
+}
+
+/// Decodes binary data with custom configuration.
+/// NEVER returns an error - always produces output.
+pub fn decode_bytes_with_carrier_config(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig,
+) -> DecodedBytes {
+    // For binary decoding, we need byte-level extraction
+    match carrier {
+        Carrier::Binary(binary_carrier) => {
+            decode_bytes_binary_carrier(code, binary_carrier, passphrase, secret_key, config)
+        }
+        Carrier::Text(text_carrier) => {
+            // Convert text carrier to binary for byte-level operations
+            let text_bytes = text_carrier.original.as_bytes().to_vec();
+            let binary_carrier = BinaryCarrierSearch::new(text_bytes);
+            decode_bytes_binary_carrier(code, &binary_carrier, passphrase, secret_key, config)
+        }
+    }
+}
+
+/// Internal: decodes binary data from a binary carrier.
+fn decode_bytes_binary_carrier(
+    code: &str,
+    carrier: &BinaryCarrierSearch,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig,
+) -> DecodedBytes {
+    if carrier.is_empty() {
+        return generate_fallback_bytes(code, passphrase, "empty_binary_carrier");
+    }
+
+    // Step 1: Decode base64
+    let encrypted = match BASE64.decode(code.trim()) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Base64 decode failed, generating fallback");
+            }
+            return generate_fallback_bytes_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decoded {} bytes from base64", encrypted.len());
+    }
+
+    // Step 2: Decrypt
+    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Decryption failed, generating fallback");
+            }
+            return generate_fallback_bytes_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!("Decrypted {} bytes", decrypted.len());
+    }
+
+    // Step 3: Deserialize
+    let data: EncodedData = match bincode::deserialize(&decrypted) {
+        Ok(data) => data,
+        Err(_) => {
+            if config.verbose {
+                eprintln!("Deserialization failed, generating fallback");
+            }
+            return generate_fallback_bytes_from_carrier(code, passphrase, carrier);
+        }
+    };
+
+    if config.verbose {
+        eprintln!(
+            "Deserialized: version={}, real_count={}, total_fragments={}",
+            data.version, data.real_count, data.fragments.len()
+        );
+    }
+
+    // Step 4: Version check (soft)
+    if data.version != VERSION && config.verbose {
+        eprintln!(
+            "Version mismatch: expected {}, got {}. Attempting anyway.",
+            VERSION, data.version
+        );
+    }
+
+    // Step 5: Extract real fragments
+    let real_count = data.real_count as usize;
+    if real_count > data.fragments.len() {
+        if config.verbose {
+            eprintln!("Invalid real_count, generating fallback");
+        }
+        return generate_fallback_bytes_from_carrier(code, passphrase, carrier);
+    }
+
+    let real_fragments = &data.fragments[..real_count];
+
+    // Step 6: Extract raw bytes from carrier (no string conversion)
+    let mut extracted_fragments: Vec<Vec<u8>> = Vec::with_capacity(real_count);
+    let mut all_bytes: Vec<u8> = Vec::new();
+
+    for found in real_fragments {
+        let bytes = carrier.extract_wrapped(found.position as usize, found.length as usize);
+
+        extracted_fragments.push(bytes.clone());
+        all_bytes.extend(bytes);
+        // Note: space_positions are ignored for binary data
+    }
+
+    if config.verbose {
+        eprintln!(
+            "Extracted {} byte fragments, total {} bytes",
+            extracted_fragments.len(),
+            all_bytes.len()
+        );
+    }
+
+    DecodedBytes {
+        data: all_bytes,
+        fragments: extracted_fragments,
+    }
+}
+
+/// Generates fallback bytes when inputs are completely invalid.
+fn generate_fallback_bytes(code: &str, passphrase: &str, context: &str) -> DecodedBytes {
+    let mut hasher = Sha256::new();
+    hasher.update(code.as_bytes());
+    hasher.update(passphrase.as_bytes());
+    hasher.update(context.as_bytes());
+    let hash = hasher.finalize();
+
+    // Return first 16 bytes of hash as garbage
+    let garbage: Vec<u8> = hash.iter().take(16).copied().collect();
+
+    DecodedBytes {
+        data: garbage.clone(),
+        fragments: vec![garbage],
+    }
+}
+
+/// Generates fallback by extracting pseudo-random bytes from binary carrier.
+fn generate_fallback_bytes_from_carrier(
+    code: &str,
+    passphrase: &str,
+    carrier: &BinaryCarrierSearch,
+) -> DecodedBytes {
+    let mut hasher = Sha256::new();
+    hasher.update(code.as_bytes());
+    hasher.update(passphrase.as_bytes());
+    let hash = hasher.finalize();
+
+    if carrier.is_empty() {
+        return generate_fallback_bytes(code, passphrase, "empty_binary_carrier_fallback");
+    }
+
+    let carrier_len = carrier.len();
+
+    // Extract 3-8 fragments based on hash
+    let num_fragments = 3 + (hash[0] as usize % 6);
+    let mut fragments: Vec<Vec<u8>> = Vec::with_capacity(num_fragments);
+    let mut all_bytes: Vec<u8> = Vec::new();
+
+    for i in 0..num_fragments {
+        // Derive position from hash
+        let pos_bytes = [hash[i * 4], hash[i * 4 + 1], hash[i * 4 + 2], hash[i * 4 + 3]];
+        let pos = u32::from_le_bytes(pos_bytes) as usize % carrier_len;
+
+        // Random length 1-5
+        let len = 1 + (hash[(i * 4 + 1) % 32] as usize % 5);
+
+        let bytes = carrier.extract_wrapped(pos, len);
+        all_bytes.extend(&bytes);
+        fragments.push(bytes);
+    }
+
+    DecodedBytes {
+        data: all_bytes,
+        fragments,
+    }
 }
 
 #[cfg(test)]
