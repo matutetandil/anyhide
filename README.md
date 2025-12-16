@@ -63,7 +63,9 @@ Anyhide uses a **pre-shared carrier** model:
 
 ### Practical Features
 - **QR code support**: Share codes via QR with Base45 encoding
+- **Code splitting**: Split codes into N parts for multi-channel delivery
 - **Multi-recipient**: Encrypt once for multiple recipients
+- **Message expiration**: Auto-expiring messages that return garbage after deadline
 - **Compression**: DEFLATE compression for longer messages
 - **Offline**: Works completely offline, no external services
 - **Fast**: Suffix array for O(m·log n) substring search
@@ -209,12 +211,16 @@ anyhide encode
   --sign <PATH>          Sign message with Ed25519 signing key
   --min-coverage <0-100> Minimum carrier coverage required (default: 100)
   --expires <TIME>       Message expiration: "+30m", "+24h", "+7d", or "2025-12-31"
+  --split <N>            Split code into N parts (2-10) for multi-channel delivery
   -v, --verbose          Show positions found
-  --qr <PATH>            Generate QR code and save to file (in addition to printing code)
+  --qr <PATH>            Generate QR code (with --split: generates N QR files)
   --qr-format <FMT>      QR format: png (default), svg, or ascii
 
 anyhide decode
-  --code <CODE>          The encrypted code to decode
+  --code <CODE>          Direct base64 code (mutually exclusive with other code inputs)
+  --code-qr <PATH>       Read code from QR image file
+  --code-file <PATH>     Read code from text file
+  --parts <FILES>...     Combine split parts (2-10 files: QR images or text files)
   -c, --carrier <PATH>   Path to carrier file (same as encoding)
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
@@ -261,6 +267,7 @@ anyhide update
 7. **Anti-Brute-Force**: Cannot distinguish wrong passphrase from correct one with different message
 8. **Deterministic Garbage**: Same wrong inputs always produce same output (prevents timing attacks)
 9. **Plausible Deniability**: "It's just a random base64 string" - every decode attempt succeeds
+10. **Code Splitting**: Split code across multiple channels; wrong order = garbage (no error)
 
 ## Example: Using a Public Text as Carrier
 
@@ -490,6 +497,62 @@ anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key
 - `2025-12-31T18:00:00` - Specific time on that date
 
 **Security note:** There is NO way to tell if a message expired vs wrong inputs. Both return garbage.
+
+## Example: Code Splitting
+
+Split your code into multiple parts that can be sent through different channels (email, SMS, QR, etc.). All parts must be combined in the exact order for successful decoding.
+
+```bash
+# Encode and split into 3 parts
+anyhide encode -c carrier.txt -m "Top secret coordinates" -p "pass" -k bob.pub --split 3
+# Output:
+# part-1: AxB2c3F4...
+# part-2: D5e6f7G8...
+# part-3: H9i0j1K2...
+# IMPORTANT: Decode with --parts in EXACT order
+
+# Decode by combining parts (order matters!)
+anyhide decode --parts part1.txt part2.txt part3.txt -c carrier.txt -p "pass" -k bob.key
+# Output: Top secret coordinates
+
+# Wrong order returns garbage (plausible deniability)
+anyhide decode --parts part2.txt part1.txt part3.txt -c carrier.txt -p "pass" -k bob.key
+# Output: (random garbage)
+```
+
+### Split with QR Codes
+
+```bash
+# Generate split QR codes
+anyhide encode -c carrier.txt -m "Secret meeting location" -p "pass" -k bob.pub --split 3 --qr code.png
+# Output:
+# QR part 1/3 saved: code-1.png
+# QR part 2/3 saved: code-2.png
+# QR part 3/3 saved: code-3.png
+# IMPORTANT: Decode with --parts in EXACT order
+
+# Decode from QR parts
+anyhide decode --parts code-1.png code-2.png code-3.png -c carrier.txt -p "pass" -k bob.key
+# Output: Secret meeting location
+```
+
+### Reading Codes from Different Sources
+
+```bash
+# Read code from QR image
+anyhide decode --code-qr received_code.png -c carrier.txt -p "pass" -k bob.key
+
+# Read code from text file
+anyhide decode --code-file code.txt -c carrier.txt -p "pass" -k bob.key
+
+# Mix QR and text parts (auto-detected by extension)
+anyhide decode --parts part1.png part2.txt part3.png -c carrier.txt -p "pass" -k bob.key
+```
+
+**Security benefits:**
+- Parts can be sent through different channels (harder to intercept all)
+- Order requirement adds another layer of security
+- Wrong order = garbage (indistinguishable from wrong passphrase)
 
 ## Project Structure
 

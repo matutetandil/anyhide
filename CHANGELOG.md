@@ -38,13 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - No way to tell if message expired vs wrong inputs
   - Verbose mode shows time remaining until expiration
 
+- **Code Splitting**
+  - New `--split N` flag in encode command to split code into N parts (2-10)
+  - Parts can be sent through different channels for added security
+  - Parts MUST be combined in EXACT order for successful decode
+  - With `--qr`: generates N separate QR images (code-1.png, code-2.png, etc.)
+  - Multiple decode input methods:
+    - `--code <TEXT>` - Direct base64 text
+    - `--code-qr <PATH>` - Read code from QR image
+    - `--code-file <PATH>` - Read code from text file
+    - `--parts <FILE1> <FILE2> ...` - Combine split parts (text files or QR images)
+  - Wrong order returns garbage (plausible deniability preserved)
+
 ### Security Notes
 
 - **Maximum security (default)**: Use carriers that contain ALL characters of your message with exact case
 - **Reduced security**: Lowering `--min-coverage` allows more carriers but char_overrides may reveal message patterns
 - **Signature verification**: Always use `--verify` when decoding signed messages to ensure authenticity
 
-### Example
+### Examples
 
 ```bash
 # Generate keys (creates both encryption and signing keys)
@@ -56,6 +68,13 @@ anyhide encode -c carrier.txt -m "Secret message" -p "pass" -k bob.pub --sign al
 # Decode and verify
 anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key --verify alice.sign.pub
 # Output: Message valid for 167h 59m more
+
+# Split code into 3 parts with QR codes
+anyhide encode -c carrier.txt -m "Top secret" -p "pass" -k bob.pub --split 3 --qr code.png
+# Output: code-1.png, code-2.png, code-3.png
+
+# Decode from QR parts (order matters!)
+anyhide decode --parts code-1.png code-2.png code-3.png -c carrier.txt -p "pass" -k bob.key
 ```
 
 ## [0.6.1] - 2025-12-15

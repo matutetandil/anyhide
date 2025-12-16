@@ -100,6 +100,13 @@ enum Commands {
         /// After expiration, decode returns garbage (plausible deniability)
         #[arg(long)]
         expires: Option<String>,
+
+        /// Split the code into N parts (2-10)
+        /// Each part is independent base64 without indices
+        /// The correct ORDER is part of the secret - wrong order = garbage
+        /// Parts can be sent via different channels for extra security
+        #[arg(long, value_parser = clap::value_parser!(u8).range(2..=10))]
+        split: Option<u8>,
     },
 
     /// Decode a message using a pre-shared carrier (ANY file)
@@ -109,10 +116,29 @@ enum Commands {
     ///
     /// Use -o/--output to write raw bytes to a file (required for binary data).
     /// Without -o, output is printed as text (lossy UTF-8 conversion).
+    ///
+    /// Code can be provided as:
+    /// - Direct text: --code "abc..."
+    /// - QR image: --code-qr image.png
+    /// - Text file: --code-file code.txt
+    /// - Split parts: --parts part1.txt part2.txt (files or QR images, in order)
     Decode {
-        /// The encrypted code to decode
-        #[arg(long)]
-        code: String,
+        /// The encrypted code (direct text)
+        #[arg(long, conflicts_with_all = ["code_qr", "code_file", "parts"])]
+        code: Option<String>,
+
+        /// Read code from a QR image file (.png, .jpg)
+        #[arg(long, conflicts_with_all = ["code", "code_file", "parts"])]
+        code_qr: Option<PathBuf>,
+
+        /// Read code from a text file
+        #[arg(long, conflicts_with_all = ["code", "code_qr", "parts"])]
+        code_file: Option<PathBuf>,
+
+        /// Split code parts (text files or QR images, in order)
+        /// Order matters - wrong order = garbage (plausible deniability)
+        #[arg(long, num_args = 2..=10, conflicts_with_all = ["code", "code_qr", "code_file"])]
+        parts: Option<Vec<PathBuf>>,
 
         /// Path to carrier file (must be the EXACT same file used for encoding)
         #[arg(short, long)]
@@ -246,17 +272,21 @@ fn main() -> Result<()> {
             sign,
             min_coverage,
             expires,
-        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format, sign.as_ref(), min_coverage, expires.as_deref())?,
+            split,
+        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format, sign.as_ref(), min_coverage, expires.as_deref(), split)?,
 
         Commands::Decode {
             code,
+            code_qr,
+            code_file,
+            parts,
             carrier,
             passphrase,
             key,
             output,
             verbose,
             verify,
-        } => decode_cmd(&code, &carrier, &passphrase, &key, output.as_ref(), verbose, verify.as_ref()),
+        } => decode_cmd(code.as_deref(), code_qr.as_ref(), code_file.as_ref(), parts.as_ref(), &carrier, &passphrase, &key, output.as_ref(), verbose, verify.as_ref()),
 
         Commands::MultiEncrypt {
             message,
@@ -388,6 +418,110 @@ fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Splits a code into N approximately equal parts.
+/// Parts are split at character boundaries (not byte boundaries).
+fn split_code(code: &str, n: usize) -> Vec<String> {
+    if n <= 1 {
+        return vec![code.to_string()];
+    }
+
+    let chars: Vec<char> = code.chars().collect();
+    let total = chars.len();
+    let base_size = total / n;
+    let remainder = total % n;
+
+    let mut parts = Vec::with_capacity(n);
+    let mut start = 0;
+
+    for i in 0..n {
+        // Distribute remainder across first parts
+        let size = base_size + if i < remainder { 1 } else { 0 };
+        let end = start + size;
+        parts.push(chars[start..end].iter().collect());
+        start = end;
+    }
+
+    parts
+}
+
+/// Joins split code parts back together.
+/// Parts can be separated by commas or provided in order.
+fn join_code_parts(code: &str) -> String {
+    // Check if it looks like split parts (contains commas)
+    if code.contains(',') {
+        code.split(',')
+            .map(|s| s.trim())
+            .collect::<Vec<_>>()
+            .join("")
+    } else {
+        code.to_string()
+    }
+}
+
+/// Reads code from a file - either a text file or a QR image.
+/// Determines type by file extension.
+fn read_code_from_file(path: &PathBuf) -> Result<String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" => {
+            // Read from QR image - returns binary data, need to encode to base64
+            let data = read_qr_from_file(path)
+                .with_context(|| format!("Failed to read QR code from {}", path.display()))?;
+            Ok(BASE64.encode(&data))
+        }
+        _ => {
+            // Read as text file
+            std::fs::read_to_string(path)
+                .map(|s| s.trim().to_string())
+                .with_context(|| format!("Failed to read code from {}", path.display()))
+        }
+    }
+}
+
+/// Reads and concatenates code from multiple part files.
+/// Parts can be text files or QR images.
+/// For QR images: concatenate binary data, then encode to base64.
+/// For text files: concatenate the text directly.
+fn read_code_parts(parts: &[PathBuf]) -> Result<String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    // Check if all parts are QR images
+    let all_qr = parts.iter().all(|p| {
+        let ext = p.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp")
+    });
+
+    if all_qr {
+        // QR mode: concatenate binary data, then encode to base64
+        let mut combined_bytes = Vec::new();
+        for (i, part_path) in parts.iter().enumerate() {
+            let part_data = read_qr_from_file(part_path)
+                .with_context(|| format!("Failed to read QR part {} from {}", i + 1, part_path.display()))?;
+            combined_bytes.extend_from_slice(&part_data);
+        }
+        Ok(BASE64.encode(&combined_bytes))
+    } else {
+        // Text mode: concatenate text directly
+        let mut combined = String::new();
+        for (i, part_path) in parts.iter().enumerate() {
+            let part_code = std::fs::read_to_string(part_path)
+                .map(|s| s.trim().to_string())
+                .with_context(|| format!("Failed to read part {} from {}", i + 1, part_path.display()))?;
+            combined.push_str(&part_code);
+        }
+        Ok(combined)
+    }
+}
+
 /// Generates new key pairs (encryption + signing) and saves to files.
 fn keygen(output: &PathBuf) -> Result<()> {
     // Generate X25519 encryption key pair
@@ -452,6 +586,7 @@ fn encode_cmd(
     sign_key_path: Option<&PathBuf>,
     min_coverage: u8,
     expires: Option<&str>,
+    split: Option<u8>,
 ) -> Result<()> {
     // Load carrier with auto-detection based on file extension
     let carrier = Carrier::from_file(carrier_path)
@@ -546,7 +681,20 @@ fn encode_cmd(
             .context("Failed to encode message")?
     };
 
-    println!("{}", encoded.code);
+    // Output code (split if requested)
+    if let Some(n) = split {
+        let parts = split_code(&encoded.code, n as usize);
+        for (i, part) in parts.iter().enumerate() {
+            println!("part-{}: {}", i + 1, part);
+        }
+        if verbose {
+            eprintln!();
+            eprintln!("Split into {} parts ({} chars each approx)", n, encoded.code.len() / n as usize);
+            eprintln!("IMPORTANT: Parts must be combined in EXACT order to decode");
+        }
+    } else {
+        println!("{}", encoded.code);
+    }
 
     if verbose {
         eprintln!();
@@ -560,10 +708,6 @@ fn encode_cmd(
     if let Some(qr_path) = qr_output {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-        let data = BASE64
-            .decode(&encoded.code)
-            .context("Failed to decode generated code for QR")?;
-
         let format = match qr_format.to_lowercase().as_str() {
             "png" => QrFormat::Png,
             "svg" => QrFormat::Svg,
@@ -571,18 +715,53 @@ fn encode_cmd(
             _ => anyhow::bail!("Unknown QR format: {}. Use: png, svg, or ascii", qr_format),
         };
 
-        let config = QrConfig {
+        let qr_config = QrConfig {
             format,
             ..Default::default()
         };
 
-        generate_qr_to_file(&data, qr_path, &config)
-            .context("Failed to generate QR code")?;
+        // If split is enabled, generate multiple QR codes
+        if let Some(n) = split {
+            // Decode the full code to binary, then split the binary data
+            let full_data = BASE64.decode(&encoded.code)
+                .context("Failed to decode code for QR splitting")?;
 
-        let info = qr_capacity_info(data.len());
-        eprintln!();
-        eprintln!("QR code saved: {}", qr_path.display());
-        eprintln!("  QR version: {} | Format: {}", info.qr_version, qr_format);
+            let stem = qr_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("code");
+            let ext = qr_path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let parent = qr_path.parent().unwrap_or(std::path::Path::new("."));
+
+            // Split binary data into n parts
+            let chunk_size = (full_data.len() + n as usize - 1) / n as usize;
+            let binary_parts: Vec<&[u8]> = full_data.chunks(chunk_size).collect();
+
+            eprintln!();
+            for (i, part_data) in binary_parts.iter().enumerate() {
+                let part_path = parent.join(format!("{}-{}.{}", stem, i + 1, ext));
+
+                generate_qr_to_file(part_data, &part_path, &qr_config)
+                    .with_context(|| format!("Failed to generate QR code part {}", i + 1))?;
+
+                let info = qr_capacity_info(part_data.len());
+                eprintln!("QR part {}/{} saved: {} (QR version: {}, {} bytes)", i + 1, n, part_path.display(), info.qr_version, part_data.len());
+            }
+            eprintln!("IMPORTANT: Decode with --parts in EXACT order");
+        } else {
+            let data = BASE64
+                .decode(&encoded.code)
+                .context("Failed to decode generated code for QR")?;
+
+            generate_qr_to_file(&data, qr_path, &qr_config)
+                .context("Failed to generate QR code")?;
+
+            let info = qr_capacity_info(data.len());
+            eprintln!();
+            eprintln!("QR code saved: {}", qr_path.display());
+            eprintln!("  QR version: {} | Format: {}", info.qr_version, qr_format);
+        }
     }
 
     Ok(())
@@ -593,7 +772,10 @@ fn encode_cmd(
 /// Without -o, output is printed as text.
 /// NEVER fails - returns garbage if inputs are wrong (plausible deniability).
 fn decode_cmd(
-    code: &str,
+    code: Option<&str>,
+    code_qr: Option<&PathBuf>,
+    code_file: Option<&PathBuf>,
+    parts: Option<&Vec<PathBuf>>,
     carrier_path: &PathBuf,
     passphrase: &str,
     key_path: &PathBuf,
@@ -601,6 +783,47 @@ fn decode_cmd(
     verbose: bool,
     verify_key_path: Option<&PathBuf>,
 ) {
+    // Resolve code from the various input sources
+    let code: String = if let Some(c) = code {
+        // Direct text, possibly comma-separated parts
+        join_code_parts(c)
+    } else if let Some(qr_path) = code_qr {
+        // Read from QR image
+        match read_code_from_file(qr_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: Could not read QR code: {}", e);
+                String::new()
+            }
+        }
+    } else if let Some(file_path) = code_file {
+        // Read from text file
+        match read_code_from_file(file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: Could not read code file: {}", e);
+                String::new()
+            }
+        }
+    } else if let Some(part_paths) = parts {
+        // Read and concatenate parts
+        match read_code_parts(part_paths) {
+            Ok(c) => {
+                if verbose {
+                    eprintln!("Combined {} parts", part_paths.len());
+                }
+                c
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not read parts: {}", e);
+                String::new()
+            }
+        }
+    } else {
+        eprintln!("Error: No code provided. Use --code, --code-qr, --code-file, or --parts");
+        return;
+    };
+
     // Load carrier with auto-detection based on file extension
     let carrier = match Carrier::from_file(carrier_path) {
         Ok(c) => c,
@@ -647,7 +870,7 @@ fn decode_cmd(
 
     // If output file is specified, decode as binary
     if let Some(output_path) = output {
-        let decoded = anyhide::decode_bytes_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
+        let decoded = anyhide::decode_bytes_with_carrier_config(&code, &carrier, passphrase, &secret_key, &config);
 
         match std::fs::write(output_path, &decoded.data) {
             Ok(_) => {
@@ -667,7 +890,7 @@ fn decode_cmd(
         }
     } else {
         // Decode as text
-        let decoded = decode_with_carrier_config(code, &carrier, passphrase, &secret_key, &config);
+        let decoded = decode_with_carrier_config(&code, &carrier, passphrase, &secret_key, &config);
 
         println!("{}", decoded.message);
 
