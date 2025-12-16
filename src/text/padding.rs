@@ -1,4 +1,4 @@
-//! Block padding for KAMO v0.4.
+//! Block padding for Anyhide.
 //!
 //! This module handles padding messages to block boundaries to hide
 //! the actual message length from attackers.

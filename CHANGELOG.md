@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2025-12-16
+
+### Changed
+
+- **CLI Refactored with Strategy Pattern**
+  - Moved all command logic from `main.rs` to `src/commands/` module
+  - Each command is now a separate file implementing `CommandExecutor` trait
+  - `main.rs` reduced from ~1200 lines to ~90 lines
+  - Makes adding new commands easier and improves maintainability
+
+- **Documentation Split**
+  - `README.md` is now a focused user manual
+  - New `ARCHITECTURE.md` contains technical documentation for developers
+  - Project structure, design patterns, and development guide moved to ARCHITECTURE.md
+
+- **Removed Legacy "KAMO" References**
+  - Updated all documentation comments to use "Anyhide" instead of "KAMO"
+  - Cryptographic salts unchanged for backwards compatibility
+
 ## [0.7.0] - 2025-12-16
 
 ### Added

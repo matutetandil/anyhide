@@ -1,4 +1,4 @@
-//! QR code generation and reading for KAMO codes.
+//! QR code generation and reading for Anyhide codes.
 //!
 //! Uses Base45 encoding for optimal QR code capacity.
 //! Base45 is designed for QR alphanumeric mode, providing ~45% more
@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_base45_roundtrip() {
-        let data = b"Hello, KAMO!";
+        let data = b"Hello, Anyhide!";
         let encoded = encode_base45(data);
         let decoded = decode_base45(&encoded).unwrap();
         assert_eq!(decoded, data);

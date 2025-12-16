@@ -1,4 +1,4 @@
-//! Text processing for KAMO steganography.
+//! Text processing for Anyhide steganography.
 //!
 //! This module provides:
 //! - Variable message fragmentation (passphrase-based sizes)

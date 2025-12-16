@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let kp = KeyPair::generate();
-        let plaintext = b"Hello, KAMO!";
+        let plaintext = b"Hello, Anyhide!";
 
         let encrypted = encrypt(plaintext, kp.public_key()).unwrap();
         let decrypted = decrypt(&encrypted, kp.secret_key()).unwrap();

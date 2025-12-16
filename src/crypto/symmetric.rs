@@ -1,4 +1,4 @@
-//! Symmetric encryption with passphrase for KAMO.
+//! Symmetric encryption with passphrase for Anyhide.
 //!
 //! This module provides passphrase-based symmetric encryption using:
 //! - HKDF-SHA256 for key derivation from passphrase
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let plaintext = b"Hello, KAMO v3!";
+        let plaintext = b"Hello, Anyhide!";
         let passphrase = "my_secret_passphrase";
 
         let encrypted = encrypt_symmetric(plaintext, passphrase).unwrap();

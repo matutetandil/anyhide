@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_read_qr_roundtrip() {
-        let original_data = b"Hello, KAMO QR!";
+        let original_data = b"Hello, Anyhide QR!";
 
         // Generate QR code
         let config = QrConfig {
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_read_qr_binary_data() {
-        // Test with binary data (like a real KAMO code)
+        // Test with binary data (like a real Anyhide code)
         let original_data: Vec<u8> = (0..100).map(|i| (i * 7) as u8).collect();
 
         let config = QrConfig {
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_read_qr_larger_data() {
-        // Test with larger data (~500 bytes, typical KAMO code size)
+        // Test with larger data (~500 bytes, typical Anyhide code size)
         let original_data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
 
         let config = QrConfig {

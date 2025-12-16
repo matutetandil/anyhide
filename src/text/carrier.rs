@@ -1,4 +1,4 @@
-//! Generic carrier abstraction for KAMO.
+//! Generic carrier abstraction for Anyhide.
 //!
 //! Supports both text and binary carriers (images, audio, etc.).
 //! Text carriers use substring matching, binary carriers use byte-sequence matching.

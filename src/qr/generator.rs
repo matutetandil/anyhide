@@ -1,4 +1,4 @@
-//! QR code generation from KAMO codes.
+//! QR code generation from Anyhide codes.
 //!
 //! Generates QR codes using Base45 encoding for optimal capacity.
 
@@ -82,7 +82,7 @@ impl Default for QrConfig {
 /// then rendered as a QR code image.
 ///
 /// # Arguments
-/// * `data` - Binary data to encode (typically a KAMO code)
+/// * `data` - Binary data to encode (typically an Anyhide code)
 /// * `config` - QR generation configuration
 ///
 /// # Returns
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_generate_qr_small() {
-        let data = b"Hello, KAMO!";
+        let data = b"Hello, Anyhide!";
         let config = QrConfig::default();
         let output = generate_qr(data, &config).unwrap();
         assert!(output.is_image());
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_generate_qr_medium_data() {
-        // Simulate a typical KAMO code (~300 bytes)
+        // Simulate a typical Anyhide code (~300 bytes)
         let data = vec![0u8; 300];
         let config = QrConfig::default();
         let output = generate_qr(&data, &config).unwrap();

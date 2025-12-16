@@ -1,4 +1,4 @@
-//! Message compression for KAMO.
+//! Message compression for Anyhide.
 //!
 //! Uses DEFLATE compression to reduce message size before encoding,
 //! allowing longer messages to fit in the same carrier.

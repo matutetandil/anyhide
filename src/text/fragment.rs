@@ -1,4 +1,4 @@
-//! Variable message fragmentation for KAMO.
+//! Variable message fragmentation for Anyhide.
 //!
 //! This module handles fragmenting messages into variable-sized pieces
 //! for steganographic embedding. Fragment sizes are derived deterministically

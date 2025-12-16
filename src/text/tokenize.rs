@@ -1,4 +1,4 @@
-//! Carrier text search for KAMO.
+//! Carrier text search for Anyhide.
 //!
 //! This module handles searching for fragments as substrings within
 //! the carrier text. All searches are case-insensitive.

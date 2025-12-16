@@ -1,4 +1,4 @@
-//! Multi-recipient encryption for KAMO.
+//! Multi-recipient encryption for Anyhide.
 //!
 //! Allows encrypting a message for multiple recipients efficiently:
 //! 1. Generate a random symmetric key

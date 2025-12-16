@@ -1,4 +1,4 @@
-//! Carrier permutation and distributed position selection for KAMO v0.4.
+//! Carrier permutation and distributed position selection for Anyhide.
 //!
 //! This module provides:
 //! - Deterministic carrier permutation based on passphrase

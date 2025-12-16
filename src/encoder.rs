@@ -1,4 +1,4 @@
-//! Message encoding for KAMO v0.5 steganography.
+//! Message encoding for Anyhide steganography.
 //!
 //! This module orchestrates the encoding process:
 //! 1. Fragment message into variable-sized pieces (passphrase-based)
@@ -856,7 +856,7 @@ fn generate_padding_fragments_binary(
 /// Encodes arbitrary binary data using a carrier.
 ///
 /// This function allows hiding any binary data (files, images, etc.) within a carrier.
-/// The KAMO code produced is indistinguishable from text message encoding.
+/// The Anyhide code produced is indistinguishable from text message encoding.
 ///
 /// # Arguments
 /// * `carrier` - A generic carrier (must be binary for best results with binary data)
@@ -869,7 +869,7 @@ fn generate_padding_fragments_binary(
 /// let carrier = Carrier::from_file(Path::new("video.mp4"))?;
 /// let secret_file = std::fs::read("secret.zip")?;
 /// let encoded = encode_bytes_with_carrier(&carrier, &secret_file, "pass", &pub_key)?;
-/// // encoded.code is the KAMO code - no indication it contains binary data
+/// // encoded.code is the Anyhide code - no indication it contains binary data
 /// ```
 pub fn encode_bytes_with_carrier(
     carrier: &Carrier,
