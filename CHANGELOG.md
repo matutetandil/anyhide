@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2025-12-16
+
+### Added
+
+- **Message Signing (Ed25519)**
+  - Sign messages with Ed25519 digital signatures
+  - `--sign <path>` flag in encode command to sign messages
+  - `--verify <path>` flag in decode command to verify signatures
+  - Keygen now creates both encryption keys (.pub/.key) and signing keys (.sign.pub/.sign.key)
+  - Signatures are stored inside the encrypted payload (hides sender identity)
+  - Plausible deniability preserved - signature verification failure doesn't cause decode failure
+
+- **Exact Case Preservation (char_overrides)**
+  - Messages are now recovered with EXACT original case
+  - System stores character overrides when carrier case differs from message
+  - Enables signatures to always verify correctly
+  - Example: Message "Hello" found as "hello" in carrier → char_overrides stores case differences
+
+- **Carrier Coverage Validation**
+  - New `--min-coverage` flag (0-100, default: 100)
+  - At 100%: All message characters must exist exactly (same case) in carrier
+  - Lower values allow encoding with char_overrides but may leak information
+  - Prevents accidental encoding with incompatible carriers
+  - Verbose mode shows coverage details and missing characters
+
+### Security Notes
+
+- **Maximum security (default)**: Use carriers that contain ALL characters of your message with exact case
+- **Reduced security**: Lowering `--min-coverage` allows more carriers but char_overrides may reveal message patterns
+- **Signature verification**: Always use `--verify` when decoding signed messages to ensure authenticity
+
+### Example
+
+```bash
+# Generate keys (creates both encryption and signing keys)
+anyhide keygen -o alice
+
+# Encode with signature
+anyhide encode -c carrier.txt -m "Secret message" -p "pass" -k bob.pub --sign alice.sign.key
+
+# Decode and verify
+anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key --verify alice.sign.pub
+```
+
 ## [0.6.1] - 2025-12-15
 
 ### Fixed

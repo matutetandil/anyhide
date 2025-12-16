@@ -1,4 +1,4 @@
-//! Message decoding for KAMO v0.5 steganography.
+//! Message decoding for Anyhide steganography.
 //!
 //! This module orchestrates the decoding process:
 //! 1. Decode base64 and decrypt
@@ -6,6 +6,7 @@
 //! 3. Extract only real_count fragments (ignore padding)
 //! 4. Look up data from carrier at each position (text or binary)
 //! 5. Reconstruct message with spaces
+//! 6. Optionally verify signature if verifying_key is provided
 //!
 //! CRITICAL: This decoder NEVER returns an error. If decryption fails or
 //! data is invalid, it generates pseudo-random output based on the inputs.
@@ -14,12 +15,13 @@
 //! Supports both text carriers (text files, articles) and binary carriers (images, audio).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 use x25519_dalek::StaticSecret;
 
-use crate::crypto::decrypt_with_passphrase;
+use crate::crypto::{decrypt_with_passphrase, verify_signature};
 use crate::encoder::EncodedData;
-use crate::text::carrier::{Carrier, BinaryCarrierSearch};
+use crate::text::carrier::{BinaryCarrierSearch, Carrier};
 use crate::text::tokenize::CarrierSearch;
 use crate::VERSION;
 
@@ -31,6 +33,11 @@ pub struct DecodedMessage {
     pub message: String,
     /// The individual fragments extracted.
     pub fragments: Vec<String>,
+    /// Signature verification result:
+    /// - None: No signature in message OR no verifying key provided
+    /// - Some(true): Signature verified successfully
+    /// - Some(false): Signature verification FAILED (message may be tampered)
+    pub signature_valid: Option<bool>,
 }
 
 /// Result of decoding binary data.
@@ -41,18 +48,65 @@ pub struct DecodedBytes {
     pub data: Vec<u8>,
     /// The individual byte fragments extracted.
     pub fragments: Vec<Vec<u8>>,
+    /// Signature verification result:
+    /// - None: No signature in data OR no verifying key provided
+    /// - Some(true): Signature verified successfully
+    /// - Some(false): Signature verification FAILED (data may be tampered)
+    pub signature_valid: Option<bool>,
 }
 
 /// Configuration for the decoder.
-#[derive(Debug, Clone)]
-pub struct DecoderConfig {
+#[derive(Debug, Clone, Default)]
+pub struct DecoderConfig<'a> {
     /// Whether to output verbose information.
     pub verbose: bool,
+    /// Optional verifying key for signature verification.
+    /// If provided and the message contains a signature, it will be verified.
+    pub verifying_key: Option<&'a VerifyingKey>,
 }
 
-impl Default for DecoderConfig {
-    fn default() -> Self {
-        Self { verbose: false }
+/// Verifies a signature over a message hash.
+/// Returns None if no signature or no verifying key.
+/// Returns Some(true) if valid, Some(false) if invalid.
+///
+/// Signatures are always verified over the EXACT message bytes because
+/// char_overrides guarantee exact message recovery.
+fn verify_message_signature(
+    message: &[u8],
+    signature: Option<&[u8]>,
+    verifying_key: Option<&VerifyingKey>,
+    verbose: bool,
+) -> Option<bool> {
+    match (signature, verifying_key) {
+        (Some(sig), Some(key)) => {
+            // Hash the exact message (char_overrides guarantee exact recovery)
+            let mut hasher = Sha256::new();
+            hasher.update(message);
+            let message_hash = hasher.finalize();
+
+            let result = verify_signature(&message_hash, sig, key).is_ok();
+            if verbose {
+                if result {
+                    eprintln!("Signature verification: VALID");
+                } else {
+                    eprintln!("Signature verification: FAILED");
+                }
+            }
+            Some(result)
+        }
+        (Some(_), None) => {
+            if verbose {
+                eprintln!("Message has signature but no verifying key provided");
+            }
+            None
+        }
+        (None, Some(_)) => {
+            if verbose {
+                eprintln!("Verifying key provided but message has no signature");
+            }
+            None
+        }
+        (None, None) => None,
     }
 }
 
@@ -87,7 +141,7 @@ pub fn decode_with_config(
     carrier: &str,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     let carrier = carrier.trim();
     let carrier_search = CarrierSearch::new(carrier);
@@ -172,10 +226,13 @@ pub fn decode_with_config(
 
     for found in real_fragments {
         // Extract characters from carrier at the stored position
-        let extracted = carrier_search.extract_wrapped(
+        let raw_extracted = carrier_search.extract_wrapped(
             found.position as usize,
             found.length as usize,
         );
+
+        // Apply char_overrides to restore original case/characters
+        let extracted = found.apply_overrides(&raw_extracted);
 
         extracted_fragments.push(extracted.clone());
 
@@ -196,9 +253,18 @@ pub fn decode_with_config(
     // Step 7: Join fragments into message
     let message = message_parts.concat();
 
+    // Step 8: Verify signature if present and verifying key provided
+    let signature_valid = verify_message_signature(
+        message.as_bytes(),
+        data.signature.as_deref(),
+        config.verifying_key,
+        config.verbose,
+    );
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
+        signature_valid,
     }
 }
 
@@ -221,6 +287,7 @@ fn generate_fallback_output(code: &str, passphrase: &str, context: &str) -> Deco
     DecodedMessage {
         message: garbage.clone(),
         fragments: vec![garbage],
+        signature_valid: None,
     }
 }
 
@@ -259,7 +326,11 @@ fn generate_fallback_from_carrier(
 
     let message = fragments.join(" ");
 
-    DecodedMessage { message, fragments }
+    DecodedMessage {
+        message,
+        fragments,
+        signature_valid: None,
+    }
 }
 
 // ============================================================================
@@ -292,7 +363,7 @@ pub fn decode_with_carrier_config(
     carrier: &Carrier,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     match carrier {
         Carrier::Text(text_carrier) => {
@@ -310,7 +381,7 @@ fn decode_text_carrier(
     carrier: &CarrierSearch,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     if carrier.is_empty() {
         return generate_fallback_output(code, passphrase, "empty_carrier");
@@ -388,10 +459,13 @@ fn decode_text_carrier(
     let mut message_parts: Vec<String> = Vec::with_capacity(real_count);
 
     for found in real_fragments {
-        let extracted = carrier.extract_wrapped(
+        let raw_extracted = carrier.extract_wrapped(
             found.position as usize,
             found.length as usize,
         );
+
+        // Apply char_overrides to restore original case/characters
+        let extracted = found.apply_overrides(&raw_extracted);
 
         extracted_fragments.push(extracted.clone());
 
@@ -409,9 +483,18 @@ fn decode_text_carrier(
 
     let message = message_parts.concat();
 
+    // Verify signature if present
+    let signature_valid = verify_message_signature(
+        message.as_bytes(),
+        data.signature.as_deref(),
+        config.verifying_key,
+        config.verbose,
+    );
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
+        signature_valid,
     }
 }
 
@@ -421,7 +504,7 @@ fn decode_binary_carrier(
     carrier: &BinaryCarrierSearch,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     if carrier.is_empty() {
         return generate_fallback_output(code, passphrase, "empty_binary_carrier");
@@ -505,7 +588,11 @@ fn decode_binary_carrier(
         );
 
         // Try to convert bytes to UTF-8 string
-        let extracted = String::from_utf8_lossy(&bytes).to_string();
+        let raw_extracted = String::from_utf8_lossy(&bytes).to_string();
+
+        // Apply char_overrides to restore original case/characters
+        let extracted = found.apply_overrides(&raw_extracted);
+
         extracted_fragments.push(extracted.clone());
 
         let mut part = extracted;
@@ -522,9 +609,18 @@ fn decode_binary_carrier(
 
     let message = message_parts.concat();
 
+    // Verify signature if present
+    let signature_valid = verify_message_signature(
+        message.as_bytes(),
+        data.signature.as_deref(),
+        config.verifying_key,
+        config.verbose,
+    );
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
+        signature_valid,
     }
 }
 
@@ -564,7 +660,11 @@ fn generate_fallback_from_binary_carrier(
 
     let message = fragments.join(" ");
 
-    DecodedMessage { message, fragments }
+    DecodedMessage {
+        message,
+        fragments,
+        signature_valid: None,
+    }
 }
 
 // ============================================================================
@@ -604,7 +704,7 @@ pub fn decode_bytes_with_carrier_config(
     carrier: &Carrier,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedBytes {
     // For binary decoding, we need byte-level extraction
     match carrier {
@@ -626,7 +726,7 @@ fn decode_bytes_binary_carrier(
     carrier: &BinaryCarrierSearch,
     passphrase: &str,
     secret_key: &StaticSecret,
-    config: &DecoderConfig,
+    config: &DecoderConfig<'_>,
 ) -> DecodedBytes {
     if carrier.is_empty() {
         return generate_fallback_bytes(code, passphrase, "empty_binary_carrier");
@@ -719,9 +819,18 @@ fn decode_bytes_binary_carrier(
         );
     }
 
+    // Verify signature if present (for binary, we sign the raw bytes)
+    let signature_valid = verify_message_signature(
+        &all_bytes,
+        data.signature.as_deref(),
+        config.verifying_key,
+        config.verbose,
+    );
+
     DecodedBytes {
         data: all_bytes,
         fragments: extracted_fragments,
+        signature_valid,
     }
 }
 
@@ -739,6 +848,7 @@ fn generate_fallback_bytes(code: &str, passphrase: &str, context: &str) -> Decod
     DecodedBytes {
         data: garbage.clone(),
         fragments: vec![garbage],
+        signature_valid: None,
     }
 }
 
@@ -780,6 +890,7 @@ fn generate_fallback_bytes_from_carrier(
     DecodedBytes {
         data: all_bytes,
         fragments,
+        signature_valid: None,
     }
 }
 

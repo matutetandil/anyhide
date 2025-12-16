@@ -1,4 +1,4 @@
-//! Cryptographic operations for KAMO.
+//! Cryptographic operations for Anyhide.
 //!
 //! This module provides:
 //! - Key generation and management (X25519)
@@ -7,17 +7,23 @@
 //! - Hybrid encryption (symmetric + asymmetric layers)
 //! - Message compression (DEFLATE)
 //! - Forward secrecy with ephemeral keys
+//! - Digital signatures (Ed25519)
 
 pub mod asymmetric;
 pub mod compression;
 pub mod keys;
 pub mod multi_recipient;
+pub mod signing;
 pub mod symmetric;
 
 pub use asymmetric::{decrypt, decrypt_from_bytes, encrypt, encrypt_to_bytes, AsymmetricError, EncryptedData};
 pub use compression::{compress, decompress, CompressionError};
 pub use keys::{decode_public_key_pem, decode_secret_key_pem, load_public_key, load_secret_key, KeyError, KeyPair};
 pub use multi_recipient::{decrypt_multi, encrypt_multi, MultiRecipientData, MultiRecipientError};
+pub use signing::{
+    decode_signing_key_pem, decode_verifying_key_pem, load_signing_key, load_verifying_key,
+    sign_message, verify_signature, SigningError, SigningKeyPair,
+};
 pub use symmetric::{decrypt_symmetric, encrypt_symmetric, SymmetricError};
 
 use thiserror::Error;

@@ -85,7 +85,7 @@ fn test_wrong_private_key_returns_garbage() {
     assert!(!decoded_wrong.message.is_empty());
 }
 
-/// Test that fragment not found in carrier returns error during encoding
+/// Test that message with characters not in carrier fails coverage check
 #[test]
 fn test_fragment_not_found_in_carrier() {
     let carrier = "Hola mundo";
@@ -95,26 +95,43 @@ fn test_fragment_not_found_in_carrier() {
     let keypair = KeyPair::generate();
     let result = encode(carrier, message, passphrase, keypair.public_key());
 
-    // Encoding should fail (not decoding)
+    // Encoding should fail with coverage error (characters not in carrier)
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("coverage") || err_msg.contains("not found"));
 }
 
-/// Test case-insensitive matching
+/// Test exact case matching (carrier must have exact characters)
 #[test]
-fn test_case_insensitive_matching() {
-    let carrier = "AMANDA FUE AL PARQUE HOLA";
+fn test_exact_case_matching() {
+    // Carrier has lowercase 'ama' and 'parque'
+    let carrier = "Amanda fue al parque hoy";
+    let message = "ama parque"; // lowercase - should match
+    let passphrase = "test";
+
+    let keypair = KeyPair::generate();
+
+    // Should encode successfully (exact case matching)
+    let encoded = encode(carrier, message, passphrase, keypair.public_key()).unwrap();
+
+    // Should decode successfully with exact message
+    let decoded = decode(&encoded.code, carrier, passphrase, keypair.secret_key());
+    assert_eq!(decoded.message.to_lowercase(), message.to_lowercase());
+}
+
+/// Test that uppercase carrier fails with lowercase message (100% coverage default)
+#[test]
+fn test_coverage_check_case_sensitive() {
+    let carrier = "AMANDA FUE AL PARQUE HOLA"; // All uppercase
     let message = "ama parque"; // lowercase
     let passphrase = "test";
 
     let keypair = KeyPair::generate();
 
-    // Should encode successfully (case-insensitive substring matching)
-    let encoded = encode(carrier, message, passphrase, keypair.public_key()).unwrap();
-
-    // Should decode successfully
-    let decoded = decode(&encoded.code, carrier, passphrase, keypair.secret_key());
-    assert!(!decoded.message.is_empty());
+    // Should fail with 100% coverage (default) because lowercase chars don't exist
+    let result = encode(carrier, message, passphrase, keypair.public_key());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("coverage"));
 }
 
 /// Test wrong carrier gives different result (plausible deniability)

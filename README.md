@@ -57,6 +57,7 @@ Anyhide uses a **pre-shared carrier** model:
 ### Military-Grade Security
 - **Dual-layer encryption**: Symmetric (ChaCha20-Poly1305) + Asymmetric (X25519)
 - **Forward secrecy**: Ephemeral keys - past messages stay secure even if keys leak
+- **Message signing**: Ed25519 digital signatures for sender authentication
 - **Plausible deniability**: Wrong passphrase returns garbage, not an error
 - **Never fails**: Decoder always returns something - prevents brute-force detection
 
@@ -156,11 +157,12 @@ The binary will be available at `target/release/anyhide`.
 ### Generate Key Pair
 
 ```bash
-# Generate keys (creates mykeys.pub and mykeys.key)
+# Generate keys (creates 4 files)
 anyhide keygen -o mykeys
-
-# Share mykeys.pub with people who want to send you messages
-# Keep mykeys.key secret and secure
+# mykeys.pub       - Encryption public key (share with senders)
+# mykeys.key       - Encryption private key (keep secret)
+# mykeys.sign.pub  - Signing public key (share with receivers)
+# mykeys.sign.key  - Signing private key (keep secret)
 ```
 
 ### Encode a Message
@@ -204,6 +206,8 @@ anyhide encode
   -f, --file <PATH>      Binary file to encode (mutually exclusive with --message)
   -p, --passphrase <PASS> Passphrase for encryption
   -k, --key <PATH>       Path to recipient's public key
+  --sign <PATH>          Sign message with Ed25519 signing key
+  --min-coverage <0-100> Minimum carrier coverage required (default: 100)
   -v, --verbose          Show positions found
   --qr <PATH>            Generate QR code and save to file (in addition to printing code)
   --qr-format <FMT>      QR format: png (default), svg, or ascii
@@ -213,6 +217,7 @@ anyhide decode
   -c, --carrier <PATH>   Path to carrier file (same as encoding)
   -p, --passphrase <PASS> Passphrase for decryption
   -k, --key <PATH>       Path to your private key
+  --verify <PATH>        Verify signature with Ed25519 signing public key
   -o, --output <PATH>    Output file for decoded data (required for binary)
   -v, --verbose          Show positions and fragments
 
@@ -389,6 +394,65 @@ anyhide qr-info --size 500
 
 **Why Base45?** Standard QR codes have an alphanumeric mode that's more efficient than byte mode. Base45 uses only alphanumeric characters, providing ~45% more capacity than Base64 for QR codes.
 
+## Example: Message Signing (Ed25519)
+
+Sign messages to prove sender authenticity. The signature is hidden inside the encrypted payload, so receivers cannot determine if a message is signed without decrypting.
+
+```bash
+# Alice generates her keys (includes signing keys)
+anyhide keygen -o alice
+# Creates: alice.pub, alice.key, alice.sign.pub, alice.sign.key
+
+# Bob generates his keys
+anyhide keygen -o bob
+
+# Alice encodes AND signs the message
+anyhide encode \
+  -c carrier.txt \
+  -m "This message is from Alice" \
+  -p "secret" \
+  -k bob.pub \
+  --sign alice.sign.key
+
+# Bob decodes AND verifies the signature
+anyhide decode \
+  --code "..." \
+  -c carrier.txt \
+  -p "secret" \
+  -k bob.key \
+  --verify alice.sign.pub
+# Output:
+# Decoded message: This message is from Alice
+# Signature: VALID
+```
+
+**Security properties:**
+- Signature is encrypted (hidden from observers)
+- Invalid signature doesn't cause decode failure (plausible deniability)
+- Messages are recovered with exact original case (signatures always verify)
+
+## Example: Carrier Coverage
+
+By default, Anyhide requires 100% coverage: all message characters must exist exactly (same case) in the carrier. This provides maximum security.
+
+```bash
+# This works - carrier has all characters with exact case
+echo "Hello World" > carrier.txt
+anyhide encode -c carrier.txt -m "Hello" -p "pass" -k bob.pub
+# Success: Coverage 100%
+
+# This fails - carrier doesn't have uppercase "H"
+echo "hello world" > carrier.txt
+anyhide encode -c carrier.txt -m "Hello" -p "pass" -k bob.pub
+# Error: Carrier coverage 80% is below required 100%
+
+# Allow lower coverage (accepts security risk)
+anyhide encode -c carrier.txt -m "Hello" -p "pass" -k bob.pub --min-coverage 80
+# Warning: Coverage 80% - some characters stored in code
+```
+
+**Security note:** When coverage is below 100%, missing characters are stored as "char_overrides" in the code. An attacker analyzing multiple messages might detect patterns. Use 100% coverage for maximum security.
+
 ## Project Structure
 
 ```
@@ -398,9 +462,10 @@ anyhide/
 │   ├── lib.rs               # Public re-exports, constants
 │   ├── crypto/
 │   │   ├── mod.rs           # Hybrid encryption with forward secrecy
-│   │   ├── keys.rs          # X25519 key generation, PEM format
+│   │   ├── keys.rs          # X25519 + Ed25519 key generation, PEM format
 │   │   ├── asymmetric.rs    # Encrypt/decrypt with X25519 + ChaCha20
 │   │   ├── symmetric.rs     # Passphrase-based encryption
+│   │   ├── signing.rs       # Ed25519 digital signatures
 │   │   ├── compression.rs   # DEFLATE compression
 │   │   └── multi_recipient.rs # Multi-recipient encryption
 │   ├── text/
@@ -428,12 +493,14 @@ anyhide/
 
 - **Key Exchange**: X25519 (Curve25519)
 - **Symmetric Encryption**: ChaCha20-Poly1305
+- **Digital Signatures**: Ed25519
 - **Key Derivation**: HKDF-SHA256
 - **Encryption Order**: Symmetric (passphrase) → Asymmetric (public key)
 
 ### Key Format
 
 ```
+# Encryption keys (X25519)
 -----BEGIN ANYHIDE PUBLIC KEY-----
 [base64 of 32 bytes X25519 public key]
 -----END ANYHIDE PUBLIC KEY-----
@@ -441,6 +508,15 @@ anyhide/
 -----BEGIN ANYHIDE PRIVATE KEY-----
 [base64 of 32 bytes X25519 secret key]
 -----END ANYHIDE PRIVATE KEY-----
+
+# Signing keys (Ed25519)
+-----BEGIN ANYHIDE SIGNING PUBLIC KEY-----
+[base64 of 32 bytes Ed25519 public key]
+-----END ANYHIDE SIGNING PUBLIC KEY-----
+
+-----BEGIN ANYHIDE SIGNING KEY-----
+[base64 of 32 bytes Ed25519 secret key]
+-----END ANYHIDE SIGNING KEY-----
 ```
 
 ## Testing
@@ -489,4 +565,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.6.1 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.7.0 (see [CHANGELOG.md](CHANGELOG.md))

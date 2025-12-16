@@ -82,7 +82,7 @@ pub mod qr;
 pub mod text;
 
 // Re-export commonly used types at the crate root
-pub use crypto::KeyPair;
+pub use crypto::{KeyPair, SigningKeyPair};
 pub use decoder::{
     decode, decode_bytes_with_carrier, decode_bytes_with_carrier_config, decode_with_carrier,
     decode_with_carrier_config, decode_with_config, DecodedBytes, DecodedMessage, DecoderConfig,

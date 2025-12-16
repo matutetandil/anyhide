@@ -25,8 +25,11 @@ const MAX_FRAGMENT_SIZE: usize = 5;
 /// A fragment of the message ready for carrier search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fragment {
-    /// The fragment text WITHOUT spaces (for searching in carrier).
+    /// The fragment text WITHOUT spaces (for searching in carrier, lowercase).
     pub search_text: String,
+    /// The original fragment text WITHOUT spaces (preserves original case).
+    /// Used to calculate char_overrides when carrier has different case.
+    pub original_text: String,
     /// Original length including spaces.
     pub original_length: usize,
     /// Positions within the fragment where spaces should be re-inserted.
@@ -93,51 +96,54 @@ pub fn fragment_message(message: &str, passphrase: &str) -> FragmentedMessage {
         };
     }
 
-    // Normalize message to lowercase for consistent fragmentation
-    let message_lower = message.to_lowercase();
-    let total_len = message_lower.chars().count();
+    let total_len = message.chars().count();
 
-    // Split by spaces first - each word is fragmented independently
-    let words: Vec<&str> = message_lower.split(' ').filter(|w| !w.is_empty()).collect();
+    // Split into words, keeping track of both original and lowercase
+    let original_words: Vec<&str> = message.split(' ').filter(|w| !w.is_empty()).collect();
 
-    if words.is_empty() {
+    if original_words.is_empty() {
         return FragmentedMessage {
             fragments: vec![],
             original_length: total_len,
         };
     }
 
-    // Derive fragment sizes from passphrase
-    let non_space_len: usize = words.iter().map(|w| w.chars().count()).sum();
+    // Derive fragment sizes from passphrase (use lowercase for consistency)
+    let non_space_len: usize = original_words.iter().map(|w| w.chars().count()).sum();
     let sizes = derive_fragment_sizes(passphrase, non_space_len);
     let mut size_iter = sizes.into_iter();
 
     let mut fragments = Vec::new();
 
-    for (word_idx, word) in words.iter().enumerate() {
-        let is_last_word = word_idx == words.len() - 1;
-        let chars: Vec<char> = word.chars().collect();
+    for (word_idx, original_word) in original_words.iter().enumerate() {
+        let is_last_word = word_idx == original_words.len() - 1;
+        let lowercase_word = original_word.to_lowercase();
+
+        let original_chars: Vec<char> = original_word.chars().collect();
+        let lowercase_chars: Vec<char> = lowercase_word.chars().collect();
         let mut pos = 0;
 
-        while pos < chars.len() {
+        while pos < original_chars.len() {
             // Get next fragment size
-            let size = size_iter.next().unwrap_or(chars.len() - pos);
-            let end = (pos + size).min(chars.len());
+            let size = size_iter.next().unwrap_or(original_chars.len() - pos);
+            let end = (pos + size).min(original_chars.len());
 
-            let fragment_text: String = chars[pos..end].iter().collect();
-            let is_last_fragment_of_word = end >= chars.len();
+            let search_text: String = lowercase_chars[pos..end].iter().collect();
+            let original_text: String = original_chars[pos..end].iter().collect();
+            let is_last_fragment_of_word = end >= original_chars.len();
 
             // If this is the last fragment of a word (and not the last word),
             // mark that a space follows it
             let space_positions = if is_last_fragment_of_word && !is_last_word {
-                vec![fragment_text.chars().count() - 1]
+                vec![search_text.chars().count() - 1]
             } else {
                 vec![]
             };
 
-            if !fragment_text.is_empty() {
+            if !search_text.is_empty() {
                 fragments.push(Fragment {
-                    search_text: fragment_text,
+                    search_text,
+                    original_text,
                     original_length: end - pos + if !space_positions.is_empty() { 1 } else { 0 },
                     space_positions,
                 });
@@ -161,6 +167,7 @@ pub fn fragment_message(message: &str, passphrase: &str) -> FragmentedMessage {
 /// 3. Eventually falls back to individual characters
 ///
 /// The fragmentation is still deterministic for a given message+carrier+passphrase.
+/// Preserves original text case for char_overrides calculation.
 pub fn fragment_message_adaptive(
     message: &str,
     carrier: &CarrierSearch,
@@ -173,13 +180,12 @@ pub fn fragment_message_adaptive(
         };
     }
 
-    let message_lower = message.to_lowercase();
-    let total_len = message_lower.chars().count();
+    let total_len = message.chars().count();
 
-    // Split by spaces - each word is fragmented independently
-    let words: Vec<&str> = message_lower.split(' ').filter(|w| !w.is_empty()).collect();
+    // Split by spaces - keep both original and lowercase
+    let original_words: Vec<&str> = message.split(' ').filter(|w| !w.is_empty()).collect();
 
-    if words.is_empty() {
+    if original_words.is_empty() {
         return FragmentedMessage {
             fragments: vec![],
             original_length: total_len,
@@ -187,15 +193,22 @@ pub fn fragment_message_adaptive(
     }
 
     // Derive sizes for fallback (used when we need to make decisions)
-    let non_space_len: usize = words.iter().map(|w| w.chars().count()).sum();
+    let non_space_len: usize = original_words.iter().map(|w| w.chars().count()).sum();
     let fallback_sizes = derive_fragment_sizes(passphrase, non_space_len);
     let mut size_idx = 0;
 
     let mut fragments = Vec::new();
 
-    for (word_idx, word) in words.iter().enumerate() {
-        let is_last_word = word_idx == words.len() - 1;
-        let word_fragments = fragment_word_adaptive(word, carrier, &fallback_sizes, &mut size_idx);
+    for (word_idx, original_word) in original_words.iter().enumerate() {
+        let is_last_word = word_idx == original_words.len() - 1;
+        let lowercase_word = original_word.to_lowercase();
+        let word_fragments = fragment_word_adaptive(
+            &lowercase_word,
+            original_word,
+            carrier,
+            &fallback_sizes,
+            &mut size_idx,
+        );
 
         // Add all fragments from this word
         for frag in word_fragments.into_iter() {
@@ -217,61 +230,70 @@ pub fn fragment_message_adaptive(
 }
 
 /// Fragments a single word adaptively, trying larger chunks first.
+/// Takes both lowercase (for searching) and original (for preserving case).
 fn fragment_word_adaptive(
-    word: &str,
+    lowercase_word: &str,
+    original_word: &str,
     carrier: &CarrierSearch,
     fallback_sizes: &[usize],
     size_idx: &mut usize,
 ) -> Vec<Fragment> {
-    if word.is_empty() {
+    if lowercase_word.is_empty() {
         return vec![];
     }
 
-    let chars: Vec<char> = word.chars().collect();
+    let lowercase_chars: Vec<char> = lowercase_word.chars().collect();
+    let original_chars: Vec<char> = original_word.chars().collect();
 
     // Try to find the whole word first
-    if !carrier.find_all(word).is_empty() {
+    if !carrier.find_all(lowercase_word).is_empty() {
         *size_idx += 1;
         return vec![Fragment {
-            search_text: word.to_string(),
-            original_length: chars.len(),
+            search_text: lowercase_word.to_string(),
+            original_text: original_word.to_string(),
+            original_length: lowercase_chars.len(),
             space_positions: vec![],
         }];
     }
 
     // Word not found - split it adaptively
-    split_and_find(&chars, carrier, fallback_sizes, size_idx)
+    split_and_find(&lowercase_chars, &original_chars, carrier, fallback_sizes, size_idx)
 }
 
 /// Recursively splits text until all pieces are found in carrier.
+/// Maintains both lowercase and original characters in parallel.
 fn split_and_find(
-    chars: &[char],
+    lowercase_chars: &[char],
+    original_chars: &[char],
     carrier: &CarrierSearch,
     fallback_sizes: &[usize],
     size_idx: &mut usize,
 ) -> Vec<Fragment> {
-    if chars.is_empty() {
+    if lowercase_chars.is_empty() {
         return vec![];
     }
 
-    let text: String = chars.iter().collect();
+    let search_text: String = lowercase_chars.iter().collect();
+    let original_text: String = original_chars.iter().collect();
 
     // Base case: single character - must exist or we fail
-    if chars.len() == 1 {
+    if lowercase_chars.len() == 1 {
         *size_idx += 1;
         return vec![Fragment {
-            search_text: text,
+            search_text,
+            original_text,
             original_length: 1,
             space_positions: vec![],
         }];
     }
 
     // Try the whole chunk
-    if !carrier.find_all(&text).is_empty() {
+    if !carrier.find_all(&search_text).is_empty() {
         *size_idx += 1;
         return vec![Fragment {
-            search_text: text,
-            original_length: chars.len(),
+            search_text,
+            original_text,
+            original_length: lowercase_chars.len(),
             space_positions: vec![],
         }];
     }
@@ -279,50 +301,74 @@ fn split_and_find(
     // Not found - try different split strategies
     // Strategy 1: Use passphrase-derived size for first chunk
     let derived_size = fallback_sizes.get(*size_idx).copied().unwrap_or(2);
-    let split_point = derived_size.min(chars.len() - 1).max(1);
+    let split_point = derived_size.min(lowercase_chars.len() - 1).max(1);
 
     // Try this split
-    let first_part: String = chars[..split_point].iter().collect();
+    let first_search: String = lowercase_chars[..split_point].iter().collect();
+    let first_original: String = original_chars[..split_point].iter().collect();
 
-    if !carrier.find_all(&first_part).is_empty() {
+    if !carrier.find_all(&first_search).is_empty() {
         // First part found, recurse on rest
         *size_idx += 1;
         let mut result = vec![Fragment {
-            search_text: first_part,
+            search_text: first_search,
+            original_text: first_original,
             original_length: split_point,
             space_positions: vec![],
         }];
-        result.extend(split_and_find(&chars[split_point..], carrier, fallback_sizes, size_idx));
+        result.extend(split_and_find(
+            &lowercase_chars[split_point..],
+            &original_chars[split_point..],
+            carrier,
+            fallback_sizes,
+            size_idx,
+        ));
         return result;
     }
 
     // First part not found - try splitting in half
-    let half = chars.len() / 2;
-    if half > 0 && half < chars.len() {
-        let first_half: String = chars[..half].iter().collect();
-        if !carrier.find_all(&first_half).is_empty() {
+    let half = lowercase_chars.len() / 2;
+    if half > 0 && half < lowercase_chars.len() {
+        let first_half_search: String = lowercase_chars[..half].iter().collect();
+        let first_half_original: String = original_chars[..half].iter().collect();
+        if !carrier.find_all(&first_half_search).is_empty() {
             *size_idx += 1;
             let mut result = vec![Fragment {
-                search_text: first_half,
+                search_text: first_half_search,
+                original_text: first_half_original,
                 original_length: half,
                 space_positions: vec![],
             }];
-            result.extend(split_and_find(&chars[half..], carrier, fallback_sizes, size_idx));
+            result.extend(split_and_find(
+                &lowercase_chars[half..],
+                &original_chars[half..],
+                carrier,
+                fallback_sizes,
+                size_idx,
+            ));
             return result;
         }
     }
 
     // Still not found - try progressively smaller chunks from start
-    for size in (1..chars.len()).rev() {
-        let chunk: String = chars[..size].iter().collect();
-        if !carrier.find_all(&chunk).is_empty() {
+    for size in (1..lowercase_chars.len()).rev() {
+        let chunk_search: String = lowercase_chars[..size].iter().collect();
+        let chunk_original: String = original_chars[..size].iter().collect();
+        if !carrier.find_all(&chunk_search).is_empty() {
             *size_idx += 1;
             let mut result = vec![Fragment {
-                search_text: chunk,
+                search_text: chunk_search,
+                original_text: chunk_original,
                 original_length: size,
                 space_positions: vec![],
             }];
-            result.extend(split_and_find(&chars[size..], carrier, fallback_sizes, size_idx));
+            result.extend(split_and_find(
+                &lowercase_chars[size..],
+                &original_chars[size..],
+                carrier,
+                fallback_sizes,
+                size_idx,
+            ));
             return result;
         }
     }
@@ -330,11 +376,18 @@ fn split_and_find(
     // Last resort: first character + rest (single chars must exist)
     *size_idx += 1;
     let mut result = vec![Fragment {
-        search_text: chars[0].to_string(),
+        search_text: lowercase_chars[0].to_string(),
+        original_text: original_chars[0].to_string(),
         original_length: 1,
         space_positions: vec![],
     }];
-    result.extend(split_and_find(&chars[1..], carrier, fallback_sizes, size_idx));
+    result.extend(split_and_find(
+        &lowercase_chars[1..],
+        &original_chars[1..],
+        carrier,
+        fallback_sizes,
+        size_idx,
+    ));
     result
 }
 
@@ -385,6 +438,11 @@ pub struct FoundFragment {
     pub length: u8,
     /// Positions where spaces should be re-inserted.
     pub space_positions: Vec<u8>,
+    /// Character overrides: (position within fragment, original character).
+    /// Used when the carrier has a different case or character than needed.
+    /// Empty if the extracted text matches exactly.
+    #[serde(default)]
+    pub char_overrides: Vec<(u8, char)>,
 }
 
 impl FoundFragment {
@@ -394,7 +452,48 @@ impl FoundFragment {
             position: position as u32,
             length: length as u8,
             space_positions: space_positions.iter().map(|&p| p as u8).collect(),
+            char_overrides: Vec::new(),
         }
+    }
+
+    /// Creates a new FoundFragment with character overrides.
+    pub fn with_overrides(
+        position: usize,
+        length: usize,
+        space_positions: Vec<usize>,
+        char_overrides: Vec<(usize, char)>,
+    ) -> Self {
+        Self {
+            position: position as u32,
+            length: length as u8,
+            space_positions: space_positions.iter().map(|&p| p as u8).collect(),
+            char_overrides: char_overrides.iter().map(|&(p, c)| (p as u8, c)).collect(),
+        }
+    }
+
+    /// Applies character overrides to extracted text.
+    /// Returns the corrected text with exact original characters.
+    pub fn apply_overrides(&self, extracted: &str) -> String {
+        if self.char_overrides.is_empty() {
+            return extracted.to_string();
+        }
+
+        let mut chars: Vec<char> = extracted.chars().collect();
+
+        for &(pos, original_char) in &self.char_overrides {
+            let pos = pos as usize;
+            if pos < chars.len() {
+                chars[pos] = original_char;
+            } else {
+                // Character needs to be appended (extends beyond extracted length)
+                while chars.len() < pos {
+                    chars.push(' '); // Placeholder
+                }
+                chars.push(original_char);
+            }
+        }
+
+        chars.into_iter().collect()
     }
 }
 
@@ -482,6 +581,7 @@ mod tests {
         // Space after last char of fragment (word boundary)
         let fragment = Fragment {
             search_text: "hola".to_string(),
+            original_text: "hola".to_string(),
             original_length: 5, // "hola "
             space_positions: vec![3], // space after index 3 ('a')
         };
@@ -494,6 +594,7 @@ mod tests {
     fn test_reconstruct_no_spaces() {
         let fragment = Fragment {
             search_text: "hola".to_string(),
+            original_text: "hola".to_string(),
             original_length: 4,
             space_positions: vec![],
         };

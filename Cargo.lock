@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "anyhide"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base45",
@@ -111,6 +111,7 @@ dependencies = [
  "bincode",
  "chacha20poly1305",
  "clap",
+ "ed25519-dalek",
  "flate2",
  "hkdf",
  "image",
@@ -606,6 +607,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "signature",

@@ -12,16 +12,17 @@
 //! Supports both text carriers (text files, articles) and binary carriers (images, audio).
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::PublicKey;
 
-use crate::crypto::{encrypt_with_passphrase, EncryptionError};
+use crate::crypto::{encrypt_with_passphrase, sign_message, EncryptionError};
 use crate::text::carrier::{fragment_bytes_for_carrier, fragment_message_for_binary, BinaryCarrierSearch, Carrier};
 use crate::text::fragment::{fragment_message_adaptive, FoundFragment};
 use crate::text::tokenize::{select_distributed_position, CarrierSearch};
@@ -36,6 +37,12 @@ pub enum EncoderError {
     #[error("Fragment '{0}' not found in carrier")]
     FragmentNotFound(String),
 
+    #[error("Character '{0}' not found in carrier (neither uppercase nor lowercase)")]
+    CharacterNotInCarrier(char),
+
+    #[error("Carrier coverage too low: {0:.1}% (minimum required: {1:.1}%). {2} of {3} characters missing. Consider using a different carrier or lowering --min-coverage")]
+    InsufficientCoverage(f64, f64, usize, usize),
+
     #[error("Encryption error: {0}")]
     EncryptionError(#[from] EncryptionError),
 
@@ -49,7 +56,7 @@ pub enum EncoderError {
     SerializationError(String),
 }
 
-/// Data structure that gets encrypted and transmitted (v0.4.1).
+/// Data structure that gets encrypted and transmitted (v0.4.1+).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodedData {
     /// Protocol version.
@@ -58,6 +65,12 @@ pub struct EncodedData {
     pub real_count: u16,
     /// Found fragments with positions and space metadata.
     pub fragments: Vec<FoundFragment>,
+    /// Ed25519 signature over the hash of the EXACT original message (64 bytes).
+    /// Present only if the message was signed with --sign.
+    /// The signature is always case-sensitive because char_overrides guarantee
+    /// exact message recovery.
+    #[serde(default)]
+    pub signature: Option<Vec<u8>>,
 }
 
 /// Result of encoding a message.
@@ -73,14 +86,107 @@ pub struct EncodedMessage {
 
 /// Configuration for the encoder.
 #[derive(Debug, Clone)]
-pub struct EncoderConfig {
+pub struct EncoderConfig<'a> {
     /// Whether to output verbose information.
     pub verbose: bool,
+    /// Optional signing key for message authentication.
+    /// If provided, the message will be signed with Ed25519.
+    pub signing_key: Option<&'a SigningKey>,
+    /// Minimum carrier coverage required (0.0 to 1.0).
+    /// 1.0 (default) = 100% of message characters must exist exactly in carrier.
+    /// Lower values allow char_overrides but leak information about the message.
+    pub min_coverage: f64,
 }
 
-impl Default for EncoderConfig {
+impl Default for EncoderConfig<'_> {
     fn default() -> Self {
-        Self { verbose: false }
+        Self {
+            verbose: false,
+            signing_key: None,
+            min_coverage: 1.0, // 100% by default - maximum security
+        }
+    }
+}
+
+/// Calculates character overrides between extracted text and original text.
+///
+/// Returns a list of (position, original_char) for any characters that differ.
+/// This allows the decoder to reconstruct the exact original message even when
+/// the carrier has different case or characters.
+fn calculate_char_overrides(extracted: &str, original: &str) -> Vec<(usize, char)> {
+    let extracted_chars: Vec<char> = extracted.chars().collect();
+    let original_chars: Vec<char> = original.chars().collect();
+    let mut overrides = Vec::new();
+
+    for (i, original_char) in original_chars.iter().enumerate() {
+        if i < extracted_chars.len() {
+            if extracted_chars[i] != *original_char {
+                overrides.push((i, *original_char));
+            }
+        } else {
+            // Original is longer - this shouldn't normally happen but handle it
+            overrides.push((i, *original_char));
+        }
+    }
+
+    overrides
+}
+
+/// Result of carrier coverage analysis.
+#[derive(Debug)]
+pub struct CoverageResult {
+    /// Percentage of characters found exactly (0.0 to 1.0).
+    pub coverage: f64,
+    /// Total characters analyzed (non-space).
+    pub total_chars: usize,
+    /// Characters found exactly in carrier.
+    pub found_exact: usize,
+    /// Characters missing from carrier.
+    pub missing_chars: Vec<char>,
+}
+
+/// Calculates what percentage of message characters exist exactly in the carrier.
+///
+/// This checks if each character in the message can be found exactly (same case)
+/// somewhere in the carrier. Spaces are ignored.
+///
+/// Returns coverage as 0.0 to 1.0 (1.0 = 100% coverage, all chars found exactly).
+fn calculate_carrier_coverage(message: &str, carrier: &CarrierSearch) -> CoverageResult {
+    // Build a set of all characters in the carrier
+    let carrier_chars: std::collections::HashSet<char> = carrier.original.chars().collect();
+
+    let mut total_chars = 0;
+    let mut found_exact = 0;
+    let mut missing_chars = Vec::new();
+    let mut seen_missing: std::collections::HashSet<char> = std::collections::HashSet::new();
+
+    for ch in message.chars() {
+        // Skip spaces - they're handled separately
+        if ch.is_whitespace() {
+            continue;
+        }
+
+        total_chars += 1;
+
+        if carrier_chars.contains(&ch) {
+            found_exact += 1;
+        } else if !seen_missing.contains(&ch) {
+            missing_chars.push(ch);
+            seen_missing.insert(ch);
+        }
+    }
+
+    let coverage = if total_chars > 0 {
+        found_exact as f64 / total_chars as f64
+    } else {
+        1.0
+    };
+
+    CoverageResult {
+        coverage,
+        total_chars,
+        found_exact,
+        missing_chars,
     }
 }
 
@@ -109,7 +215,7 @@ pub fn encode_with_config(
     message: &str,
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
     let message = message.trim();
@@ -133,7 +239,31 @@ pub fn encode_with_config(
         eprintln!("Carrier has {} characters", carrier_search.len());
     }
 
-    // Step 2: Fragment the message ADAPTIVELY (based on what's in the carrier)
+    // Step 2: Validate carrier coverage (security check)
+    let coverage = calculate_carrier_coverage(message, &carrier_search);
+
+    if config.verbose {
+        eprintln!(
+            "Carrier coverage: {:.1}% ({}/{} characters found exactly)",
+            coverage.coverage * 100.0,
+            coverage.found_exact,
+            coverage.total_chars
+        );
+        if !coverage.missing_chars.is_empty() {
+            eprintln!("Missing characters: {:?}", coverage.missing_chars);
+        }
+    }
+
+    if coverage.coverage < config.min_coverage {
+        return Err(EncoderError::InsufficientCoverage(
+            coverage.coverage * 100.0,
+            config.min_coverage * 100.0,
+            coverage.total_chars - coverage.found_exact,
+            coverage.total_chars,
+        ));
+    }
+
+    // Step 3: Fragment the message ADAPTIVELY (based on what's in the carrier)
     let fragmented = fragment_message_adaptive(message, &carrier_search, passphrase);
     let real_count = fragmented.count();
 
@@ -146,7 +276,6 @@ pub fn encode_with_config(
     }
 
     // Step 3: Find each fragment in the carrier with distributed selection
-    // Since we used adaptive fragmentation, all fragments MUST exist
     let mut found_fragments: Vec<FoundFragment> = Vec::with_capacity(real_count);
 
     for (i, fragment) in fragmented.fragments.iter().enumerate() {
@@ -154,29 +283,67 @@ pub fn encode_with_config(
         let positions = carrier_search.find_all(&fragment.search_text);
 
         if positions.is_empty() {
-            // This should not happen with adaptive fragmentation,
-            // but handle gracefully by falling back to single chars
-            return Err(EncoderError::FragmentNotFound(fragment.search_text.clone()));
+            // Fragment not found in carrier
+            if config.min_coverage >= 1.0 {
+                // With 100% coverage requirement, this is an error
+                return Err(EncoderError::FragmentNotFound(fragment.search_text.clone()));
+            }
+
+            // With reduced coverage, create a "synthetic" fragment:
+            // - Use position 0 as dummy position
+            // - Store the ENTIRE original fragment in char_overrides
+            // This allows the decoder to reconstruct the fragment from overrides alone
+            let char_overrides: Vec<(usize, char)> = fragment
+                .original_text
+                .chars()
+                .enumerate()
+                .collect();
+
+            if config.verbose {
+                eprintln!(
+                    "Fragment {}: '{}' NOT FOUND - using synthetic fragment with {} char_overrides",
+                    i,
+                    fragment.original_text,
+                    char_overrides.len()
+                );
+            }
+
+            found_fragments.push(FoundFragment::with_overrides(
+                0, // dummy position
+                fragment.search_text.chars().count(),
+                fragment.space_positions.clone(),
+                char_overrides,
+            ));
+            continue;
         }
 
         // Select one position randomly based on passphrase + index
         let selected_pos = select_distributed_position(&positions, passphrase, i)
             .expect("positions is not empty");
 
+        // Extract from carrier and calculate char_overrides
+        let extracted = carrier_search.extract_wrapped(selected_pos, fragment.search_text.len());
+        let char_overrides = calculate_char_overrides(&extracted, &fragment.original_text);
+
         if config.verbose {
             eprintln!(
-                "Fragment {}: '{}' found at {} positions, selected {}",
+                "Fragment {}: '{}' (original: '{}') found at {} positions, selected {}",
                 i,
                 fragment.search_text,
+                fragment.original_text,
                 positions.len(),
                 selected_pos
             );
+            if !char_overrides.is_empty() {
+                eprintln!("  -> char_overrides: {:?}", char_overrides);
+            }
         }
 
-        found_fragments.push(FoundFragment::new(
+        found_fragments.push(FoundFragment::with_overrides(
             selected_pos,
             fragment.search_text.chars().count(),
             fragment.space_positions.clone(),
+            char_overrides,
         ));
     }
 
@@ -206,14 +373,31 @@ pub fn encode_with_config(
     let mut all_fragments = found_fragments;
     all_fragments.extend(padding_fragments);
 
-    // Step 5: Create encoded data
+    // Step 5: Optionally sign the message
+    // Note: We always sign the EXACT message because char_overrides guarantees
+    // exact recovery. This is the most secure approach.
+    let signature = if let Some(signing_key) = config.signing_key {
+        let mut hasher = Sha256::new();
+        hasher.update(message.as_bytes());
+        let message_hash = hasher.finalize();
+        let sig = sign_message(&message_hash, signing_key);
+        if config.verbose {
+            eprintln!("Message signed with Ed25519 ({} bytes)", message.len());
+        }
+        Some(sig)
+    } else {
+        None
+    };
+
+    // Step 6: Create encoded data
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
+        signature,
     };
 
-    // Step 6: Serialize
+    // Step 7: Serialize
     let serialized = bincode::serialize(&data)
         .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
 
@@ -221,10 +405,10 @@ pub fn encode_with_config(
         eprintln!("Serialized to {} bytes", serialized.len());
     }
 
-    // Step 7: Encrypt (symmetric with passphrase, then asymmetric with public key)
+    // Step 8: Encrypt (symmetric with passphrase, then asymmetric with public key)
     let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
 
-    // Step 8: Encode to base64
+    // Step 9: Encode to base64
     let code = BASE64.encode(&encrypted);
 
     Ok(EncodedMessage {
@@ -307,7 +491,7 @@ pub fn encode_with_carrier_config(
     message: &str,
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     match carrier {
         Carrier::Text(text_carrier) => {
@@ -325,7 +509,7 @@ fn encode_text_carrier(
     message: &str,
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
     let message = message.trim();
@@ -339,6 +523,30 @@ fn encode_text_carrier(
 
     if config.verbose {
         eprintln!("Text carrier has {} characters", carrier.len());
+    }
+
+    // Validate carrier coverage (security check)
+    let coverage = calculate_carrier_coverage(message, carrier);
+
+    if config.verbose {
+        eprintln!(
+            "Carrier coverage: {:.1}% ({}/{} characters found exactly)",
+            coverage.coverage * 100.0,
+            coverage.found_exact,
+            coverage.total_chars
+        );
+        if !coverage.missing_chars.is_empty() {
+            eprintln!("Missing characters: {:?}", coverage.missing_chars);
+        }
+    }
+
+    if coverage.coverage < config.min_coverage {
+        return Err(EncoderError::InsufficientCoverage(
+            coverage.coverage * 100.0,
+            config.min_coverage * 100.0,
+            coverage.total_chars - coverage.found_exact,
+            coverage.total_chars,
+        ));
     }
 
     // Fragment the message adaptively
@@ -360,23 +568,59 @@ fn encode_text_carrier(
         let positions = carrier.find_all(&fragment.search_text);
 
         if positions.is_empty() {
-            return Err(EncoderError::FragmentNotFound(fragment.search_text.clone()));
+            // Fragment not found in carrier
+            if config.min_coverage >= 1.0 {
+                // With 100% coverage requirement, this is an error
+                return Err(EncoderError::FragmentNotFound(fragment.search_text.clone()));
+            }
+
+            // With reduced coverage, create a "synthetic" fragment
+            let char_overrides: Vec<(usize, char)> = fragment
+                .original_text
+                .chars()
+                .enumerate()
+                .collect();
+
+            if config.verbose {
+                eprintln!(
+                    "Fragment {}: '{}' NOT FOUND - using synthetic fragment with {} char_overrides",
+                    i,
+                    fragment.original_text,
+                    char_overrides.len()
+                );
+            }
+
+            found_fragments.push(FoundFragment::with_overrides(
+                0, // dummy position
+                fragment.search_text.chars().count(),
+                fragment.space_positions.clone(),
+                char_overrides,
+            ));
+            continue;
         }
 
         let selected_pos = select_distributed_position(&positions, passphrase, i)
             .expect("positions is not empty");
 
+        // Extract from carrier and calculate char_overrides
+        let extracted = carrier.extract_wrapped(selected_pos, fragment.search_text.len());
+        let char_overrides = calculate_char_overrides(&extracted, &fragment.original_text);
+
         if config.verbose {
             eprintln!(
-                "Fragment {}: '{}' found at {} positions, selected {}",
-                i, fragment.search_text, positions.len(), selected_pos
+                "Fragment {}: '{}' (original: '{}') found at {} positions, selected {}",
+                i, fragment.search_text, fragment.original_text, positions.len(), selected_pos
             );
+            if !char_overrides.is_empty() {
+                eprintln!("  -> char_overrides: {:?}", char_overrides);
+            }
         }
 
-        found_fragments.push(FoundFragment::new(
+        found_fragments.push(FoundFragment::with_overrides(
             selected_pos,
             fragment.search_text.chars().count(),
             fragment.space_positions.clone(),
+            char_overrides,
         ));
     }
 
@@ -397,10 +641,25 @@ fn encode_text_carrier(
     let mut all_fragments = found_fragments;
     all_fragments.extend(padding_fragments);
 
+    // Optionally sign the message (always exact/case-sensitive with char_overrides)
+    let signature = if let Some(signing_key) = config.signing_key {
+        let mut hasher = Sha256::new();
+        hasher.update(message.as_bytes());
+        let message_hash = hasher.finalize();
+        let sig = sign_message(&message_hash, signing_key);
+        if config.verbose {
+            eprintln!("Message signed with Ed25519 ({} bytes)", message.len());
+        }
+        Some(sig)
+    } else {
+        None
+    };
+
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
+        signature,
     };
 
     let serialized = bincode::serialize(&data)
@@ -425,7 +684,7 @@ fn encode_binary_carrier(
     message: &str,
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
     let message = message.trim();
@@ -507,10 +766,25 @@ fn encode_binary_carrier(
     let mut all_fragments = found_fragments;
     all_fragments.extend(padding_fragments);
 
+    // Optionally sign the message (always exact/case-sensitive with char_overrides)
+    let signature = if let Some(signing_key) = config.signing_key {
+        let mut hasher = Sha256::new();
+        hasher.update(message.as_bytes());
+        let message_hash = hasher.finalize();
+        let sig = sign_message(&message_hash, signing_key);
+        if config.verbose {
+            eprintln!("Message signed with Ed25519 ({} bytes)", message.len());
+        }
+        Some(sig)
+    } else {
+        None
+    };
+
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
+        signature,
     };
 
     let serialized = bincode::serialize(&data)
@@ -601,7 +875,7 @@ pub fn encode_bytes_with_carrier_config(
     data: &[u8],
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
     if data.is_empty() {
@@ -633,7 +907,7 @@ fn encode_bytes_binary_carrier(
     data: &[u8],
     passphrase: &str,
     public_key: &PublicKey,
-    config: &EncoderConfig,
+    config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     if config.verbose {
         eprintln!("Binary carrier has {} bytes", carrier.len());
@@ -703,10 +977,25 @@ fn encode_bytes_binary_carrier(
     let mut all_fragments = found_fragments;
     all_fragments.extend(padding_fragments);
 
+    // Optionally sign the data (binary data is always exact)
+    let signature = if let Some(signing_key) = config.signing_key {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let data_hash = hasher.finalize();
+        let sig = sign_message(&data_hash, signing_key);
+        if config.verbose {
+            eprintln!("Data signed with Ed25519 ({} bytes)", sig.len());
+        }
+        Some(sig)
+    } else {
+        None
+    };
+
     let encoded_data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
+        signature,
     };
 
     let serialized = bincode::serialize(&encoded_data)
@@ -780,13 +1069,47 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_case_insensitive() {
+    fn test_encode_exact_case_match() {
+        // Carrier has all characters in correct case
+        let carrier = "Amanda fue al parque hoy";
+        let message = "ama parque"; // lowercase - all exist in carrier
+        let passphrase = "test";
+
+        let keypair = KeyPair::generate();
+        let result = encode(carrier, message, passphrase, keypair.public_key());
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_encode_insufficient_coverage() {
+        // Carrier has only uppercase, message is lowercase
         let carrier = "AMANDA FUE AL PARQUE";
         let message = "ama parque"; // lowercase
         let passphrase = "test";
 
         let keypair = KeyPair::generate();
+        // With default 100% coverage, this should fail
         let result = encode(carrier, message, passphrase, keypair.public_key());
+
+        assert!(matches!(result, Err(EncoderError::InsufficientCoverage(_, _, _, _))));
+    }
+
+    #[test]
+    fn test_encode_with_low_coverage() {
+        // Carrier has only uppercase, message is lowercase
+        let carrier = "AMANDA FUE AL PARQUE";
+        let message = "ama parque"; // lowercase
+        let passphrase = "test";
+
+        let keypair = KeyPair::generate();
+        // With 0% coverage requirement, this should work
+        let config = EncoderConfig {
+            verbose: false,
+            signing_key: None,
+            min_coverage: 0.0, // Allow any coverage
+        };
+        let result = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config);
 
         assert!(result.is_ok());
     }

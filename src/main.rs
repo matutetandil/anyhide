@@ -9,7 +9,8 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use anyhide::crypto::{
-    decrypt_multi, encrypt_multi, load_public_key, load_secret_key, KeyPair, MultiRecipientData,
+    decrypt_multi, encrypt_multi, load_public_key, load_secret_key, load_signing_key,
+    load_verifying_key, KeyPair, MultiRecipientData, SigningKeyPair,
 };
 use anyhide::qr::{generate_qr_to_file, qr_capacity_info, read_qr_from_file, QrConfig, QrFormat};
 use anyhide::{
@@ -80,6 +81,18 @@ enum Commands {
         /// QR code format: png (default), svg, or ascii
         #[arg(long, default_value = "png")]
         qr_format: String,
+
+        /// Sign the message with your signing key (Ed25519)
+        /// The recipient can verify the signature with your .sign.pub key
+        #[arg(long)]
+        sign: Option<PathBuf>,
+
+        /// Minimum carrier coverage required (0-100, default: 100)
+        /// At 100%, all message characters must exist exactly in the carrier.
+        /// Lower values allow encoding but may leak information about the message.
+        /// WARNING: Values below 100 reduce security - only use with trusted carriers.
+        #[arg(long, default_value = "100", value_parser = clap::value_parser!(u8).range(0..=100))]
+        min_coverage: u8,
     },
 
     /// Decode a message using a pre-shared carrier (ANY file)
@@ -114,6 +127,11 @@ enum Commands {
         /// Verbose output (shows extracted fragments)
         #[arg(short, long)]
         verbose: bool,
+
+        /// Verify the sender's signature with their signing public key
+        /// If provided and message is signed, verifies the signature
+        #[arg(long)]
+        verify: Option<PathBuf>,
     },
 
     /// Encrypt a message for multiple recipients
@@ -218,7 +236,9 @@ fn main() -> Result<()> {
             verbose,
             qr,
             qr_format,
-        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format)?,
+            sign,
+            min_coverage,
+        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format, sign.as_ref(), min_coverage)?,
 
         Commands::Decode {
             code,
@@ -227,7 +247,8 @@ fn main() -> Result<()> {
             key,
             output,
             verbose,
-        } => decode_cmd(&code, &carrier, &passphrase, &key, output.as_ref(), verbose),
+            verify,
+        } => decode_cmd(&code, &carrier, &passphrase, &key, output.as_ref(), verbose, verify.as_ref()),
 
         Commands::MultiEncrypt {
             message,
@@ -258,23 +279,50 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Generates a new key pair and saves to files.
+/// Generates new key pairs (encryption + signing) and saves to files.
 fn keygen(output: &PathBuf) -> Result<()> {
+    // Generate X25519 encryption key pair
     let keypair = KeyPair::generate();
-
     keypair
         .save_to_files(output)
-        .context("Failed to save key pair")?;
+        .context("Failed to save encryption key pair")?;
+
+    // Generate Ed25519 signing key pair
+    let signing_keypair = SigningKeyPair::generate();
+    signing_keypair
+        .save_to_files(output)
+        .context("Failed to save signing key pair")?;
 
     let pub_path = output.with_extension("pub");
     let key_path = output.with_extension("key");
 
-    println!("Key pair generated successfully:");
+    // Construct signing key paths
+    let sign_pub_path = {
+        let mut p = output.as_os_str().to_os_string();
+        p.push(".sign.pub");
+        std::path::PathBuf::from(p)
+    };
+    let sign_key_path = {
+        let mut p = output.as_os_str().to_os_string();
+        p.push(".sign.key");
+        std::path::PathBuf::from(p)
+    };
+
+    println!("Key pairs generated successfully:");
+    println!();
+    println!("Encryption keys (X25519):");
     println!("  Public key:  {}", pub_path.display());
     println!("  Private key: {}", key_path.display());
     println!();
-    println!("Share your public key (.pub) with people who want to send you messages.");
-    println!("Keep your private key (.key) secret and secure.");
+    println!("Signing keys (Ed25519):");
+    println!("  Public key:  {}", sign_pub_path.display());
+    println!("  Private key: {}", sign_key_path.display());
+    println!();
+    println!("Share your public keys (.pub, .sign.pub) with people who want to:");
+    println!("  - Send you encrypted messages (use .pub)");
+    println!("  - Verify your signatures (use .sign.pub)");
+    println!();
+    println!("Keep your private keys (.key, .sign.key) secret and secure.");
 
     Ok(())
 }
@@ -292,6 +340,8 @@ fn encode_cmd(
     verbose: bool,
     qr_output: Option<&PathBuf>,
     qr_format: &str,
+    sign_key_path: Option<&PathBuf>,
+    min_coverage: u8,
 ) -> Result<()> {
     // Load carrier with auto-detection based on file extension
     let carrier = Carrier::from_file(carrier_path)
@@ -305,7 +355,23 @@ fn encode_cmd(
     let public_key = load_public_key(key_path)
         .with_context(|| format!("Failed to load public key from {}", key_path.display()))?;
 
-    let config = EncoderConfig { verbose };
+    // Load signing key if provided
+    let signing_key = if let Some(sign_path) = sign_key_path {
+        let key = load_signing_key(sign_path)
+            .with_context(|| format!("Failed to load signing key from {}", sign_path.display()))?;
+        if verbose {
+            eprintln!("Message will be signed with Ed25519");
+        }
+        Some(key)
+    } else {
+        None
+    };
+
+    let config = EncoderConfig {
+        verbose,
+        signing_key: signing_key.as_ref(),
+        min_coverage: min_coverage as f64 / 100.0,
+    };
 
     // Determine if we're encoding text or binary
     let encoded = if let Some(file_path) = file {
@@ -402,6 +468,7 @@ fn decode_cmd(
     key_path: &PathBuf,
     output: Option<&PathBuf>,
     verbose: bool,
+    verify_key_path: Option<&PathBuf>,
 ) {
     // Load carrier with auto-detection based on file extension
     let carrier = match Carrier::from_file(carrier_path) {
@@ -426,7 +493,26 @@ fn decode_cmd(
         }
     };
 
-    let config = DecoderConfig { verbose };
+    // Load verifying key if provided
+    let verifying_key = verify_key_path.and_then(|path| {
+        match load_verifying_key(path) {
+            Ok(k) => {
+                if verbose {
+                    eprintln!("Will verify signature with sender's public key");
+                }
+                Some(k)
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not load verifying key: {}", e);
+                None
+            }
+        }
+    });
+
+    let config = DecoderConfig {
+        verbose,
+        verifying_key: verifying_key.as_ref(),
+    };
 
     // If output file is specified, decode as binary
     if let Some(output_path) = output {
@@ -441,6 +527,9 @@ fn decode_cmd(
             }
         }
 
+        // Show signature verification result
+        show_signature_status(decoded.signature_valid, verbose);
+
         if verbose {
             eprintln!();
             eprintln!("Byte fragments: {} fragments", decoded.fragments.len());
@@ -451,9 +540,30 @@ fn decode_cmd(
 
         println!("{}", decoded.message);
 
+        // Show signature verification result
+        show_signature_status(decoded.signature_valid, verbose);
+
         if verbose {
             eprintln!();
             eprintln!("Fragments: {:?}", decoded.fragments);
+        }
+    }
+}
+
+/// Shows the signature verification status to the user.
+fn show_signature_status(signature_valid: Option<bool>, verbose: bool) {
+    match signature_valid {
+        Some(true) => {
+            eprintln!("Signature: VALID (message authenticated)");
+        }
+        Some(false) => {
+            eprintln!("WARNING: Signature verification FAILED!");
+            eprintln!("         The message may have been tampered with or signed by a different key.");
+        }
+        None => {
+            if verbose {
+                eprintln!("Signature: None (message was not signed or no verifying key provided)");
+            }
         }
     }
 }
