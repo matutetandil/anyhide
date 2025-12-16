@@ -443,6 +443,28 @@ fn decode_text_carrier(
         );
     }
 
+    // Step 4.5: Check expiration (plausible deniability - return garbage if expired)
+    if let Some(expires_at) = data.expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if now > expires_at {
+            if config.verbose {
+                eprintln!("Message expired (expired at {}), generating fallback", expires_at);
+            }
+            return generate_fallback_from_carrier(code, passphrase, carrier);
+        }
+
+        if config.verbose {
+            let remaining = expires_at.saturating_sub(now);
+            let hours = remaining / 3600;
+            let mins = (remaining % 3600) / 60;
+            eprintln!("Message valid for {}h {}m more", hours, mins);
+        }
+    }
+
     // Step 5: Extract real fragments
     let real_count = data.real_count as usize;
     if real_count > data.fragments.len() {
@@ -564,6 +586,28 @@ fn decode_binary_carrier(
             "Version mismatch: expected {}, got {}. Attempting anyway.",
             VERSION, data.version
         );
+    }
+
+    // Step 4.5: Check expiration (plausible deniability - return garbage if expired)
+    if let Some(expires_at) = data.expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if now > expires_at {
+            if config.verbose {
+                eprintln!("Message expired (expired at {}), generating fallback", expires_at);
+            }
+            return generate_fallback_from_binary_carrier(code, passphrase, carrier);
+        }
+
+        if config.verbose {
+            let remaining = expires_at.saturating_sub(now);
+            let hours = remaining / 3600;
+            let mins = (remaining % 3600) / 60;
+            eprintln!("Message valid for {}h {}m more", hours, mins);
+        }
     }
 
     // Step 5: Extract real fragments
@@ -786,6 +830,28 @@ fn decode_bytes_binary_carrier(
             "Version mismatch: expected {}, got {}. Attempting anyway.",
             VERSION, data.version
         );
+    }
+
+    // Step 4.5: Check expiration (plausible deniability - return garbage if expired)
+    if let Some(expires_at) = data.expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if now > expires_at {
+            if config.verbose {
+                eprintln!("Message expired (expired at {}), generating fallback", expires_at);
+            }
+            return generate_fallback_bytes_from_carrier(code, passphrase, carrier);
+        }
+
+        if config.verbose {
+            let remaining = expires_at.saturating_sub(now);
+            let hours = remaining / 3600;
+            let mins = (remaining % 3600) / 60;
+            eprintln!("Message valid for {}h {}m more", hours, mins);
+        }
     }
 
     // Step 5: Extract real fragments

@@ -208,6 +208,7 @@ anyhide encode
   -k, --key <PATH>       Path to recipient's public key
   --sign <PATH>          Sign message with Ed25519 signing key
   --min-coverage <0-100> Minimum carrier coverage required (default: 100)
+  --expires <TIME>       Message expiration: "+30m", "+24h", "+7d", or "2025-12-31"
   -v, --verbose          Show positions found
   --qr <PATH>            Generate QR code and save to file (in addition to printing code)
   --qr-format <FMT>      QR format: png (default), svg, or ascii
@@ -452,6 +453,43 @@ anyhide encode -c carrier.txt -m "Hello" -p "pass" -k bob.pub --min-coverage 80
 ```
 
 **Security note:** When coverage is below 100%, missing characters are stored as "char_overrides" in the code. An attacker analyzing multiple messages might detect patterns. Use 100% coverage for maximum security.
+
+## Example: Message Expiration
+
+Messages can be set to expire automatically. After expiration, decode returns garbage (plausible deniability preserved).
+
+```bash
+# Encode with 24-hour expiration
+anyhide encode -c carrier.txt -m "Meet at location X" -p "pass" -k bob.pub --expires "+24h"
+
+# Encode with 7-day expiration
+anyhide encode -c carrier.txt -m "Secret info" -p "pass" -k bob.pub --expires "+7d"
+
+# Encode with specific date (end of day)
+anyhide encode -c carrier.txt -m "Time-sensitive" -p "pass" -k bob.pub --expires "2025-12-31"
+
+# Encode with specific datetime
+anyhide encode -c carrier.txt -m "Meeting notes" -p "pass" -k bob.pub --expires "2025-12-31T18:00:00"
+
+# Decode before expiration - works
+anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key
+# Output: Meet at location X
+# Verbose: Message valid for 23h 45m more
+
+# Decode after expiration - returns garbage
+anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key
+# Output: (random garbage from carrier)
+```
+
+**Supported expiration formats:**
+- `+30m` - 30 minutes from now
+- `+24h` - 24 hours from now
+- `+7d` - 7 days from now
+- `+1w` - 1 week from now
+- `2025-12-31` - End of day (23:59:59) on that date
+- `2025-12-31T18:00:00` - Specific time on that date
+
+**Security note:** There is NO way to tell if a message expired vs wrong inputs. Both return garbage.
 
 ## Project Structure
 

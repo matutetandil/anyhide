@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents accidental encoding with incompatible carriers
   - Verbose mode shows coverage details and missing characters
 
+- **Message Expiration**
+  - New `--expires` flag to set message expiration time
+  - Relative formats: `+30m` (30 minutes), `+24h` (24 hours), `+7d` (7 days), `+1w` (1 week)
+  - Absolute formats: `2025-12-31` or `2025-12-31T23:59:59`
+  - Expired messages return garbage (plausible deniability preserved)
+  - No way to tell if message expired vs wrong inputs
+  - Verbose mode shows time remaining until expiration
+
 ### Security Notes
 
 - **Maximum security (default)**: Use carriers that contain ALL characters of your message with exact case
@@ -42,11 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 # Generate keys (creates both encryption and signing keys)
 anyhide keygen -o alice
 
-# Encode with signature
-anyhide encode -c carrier.txt -m "Secret message" -p "pass" -k bob.pub --sign alice.sign.key
+# Encode with signature and 7-day expiration
+anyhide encode -c carrier.txt -m "Secret message" -p "pass" -k bob.pub --sign alice.sign.key --expires "+7d"
 
 # Decode and verify
 anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key --verify alice.sign.pub
+# Output: Message valid for 167h 59m more
 ```
 
 ## [0.6.1] - 2025-12-15

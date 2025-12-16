@@ -71,6 +71,10 @@ pub struct EncodedData {
     /// exact message recovery.
     #[serde(default)]
     pub signature: Option<Vec<u8>>,
+    /// Unix timestamp when the message expires.
+    /// If set and current time > expires_at, decoder returns garbage (plausible deniability).
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 /// Result of encoding a message.
@@ -96,6 +100,9 @@ pub struct EncoderConfig<'a> {
     /// 1.0 (default) = 100% of message characters must exist exactly in carrier.
     /// Lower values allow char_overrides but leak information about the message.
     pub min_coverage: f64,
+    /// Optional expiration timestamp (Unix seconds).
+    /// If set, the message will be unreadable after this time.
+    pub expires_at: Option<u64>,
 }
 
 impl Default for EncoderConfig<'_> {
@@ -104,6 +111,7 @@ impl Default for EncoderConfig<'_> {
             verbose: false,
             signing_key: None,
             min_coverage: 1.0, // 100% by default - maximum security
+            expires_at: None,
         }
     }
 }
@@ -395,6 +403,7 @@ pub fn encode_with_config(
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
+        expires_at: config.expires_at,
     };
 
     // Step 7: Serialize
@@ -660,6 +669,7 @@ fn encode_text_carrier(
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
+        expires_at: config.expires_at,
     };
 
     let serialized = bincode::serialize(&data)
@@ -785,6 +795,7 @@ fn encode_binary_carrier(
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
+        expires_at: config.expires_at,
     };
 
     let serialized = bincode::serialize(&data)
@@ -996,6 +1007,7 @@ fn encode_bytes_binary_carrier(
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
+        expires_at: config.expires_at,
     };
 
     let serialized = bincode::serialize(&encoded_data)
@@ -1108,6 +1120,7 @@ mod tests {
             verbose: false,
             signing_key: None,
             min_coverage: 0.0, // Allow any coverage
+            expires_at: None,
         };
         let result = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config);
 

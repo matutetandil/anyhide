@@ -23,7 +23,7 @@ use anyhide::{
 /// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
 #[command(name = "anyhide")]
-#[command(version = "0.6.1")]
+#[command(version = "0.7.0")]
 #[command(about = "Advanced steganography with compression, forward secrecy, and multi-carrier support")]
 #[command(long_about = None)]
 struct Cli {
@@ -93,6 +93,13 @@ enum Commands {
         /// WARNING: Values below 100 reduce security - only use with trusted carriers.
         #[arg(long, default_value = "100", value_parser = clap::value_parser!(u8).range(0..=100))]
         min_coverage: u8,
+
+        /// Message expiration time
+        /// Relative: "+30m" (30 minutes), "+24h" (24 hours), "+7d" (7 days)
+        /// Absolute: "2025-12-31" or "2025-12-31T23:59:59"
+        /// After expiration, decode returns garbage (plausible deniability)
+        #[arg(long)]
+        expires: Option<String>,
     },
 
     /// Decode a message using a pre-shared carrier (ANY file)
@@ -238,7 +245,8 @@ fn main() -> Result<()> {
             qr_format,
             sign,
             min_coverage,
-        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format, sign.as_ref(), min_coverage)?,
+            expires,
+        } => encode_cmd(&carrier, message, file.as_ref(), &passphrase, &key, verbose, qr.as_ref(), &qr_format, sign.as_ref(), min_coverage, expires.as_deref())?,
 
         Commands::Decode {
             code,
@@ -277,6 +285,107 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parses an expiration string into a Unix timestamp.
+///
+/// Supported formats:
+/// - Relative: "+30m" (30 minutes), "+24h" (24 hours), "+7d" (7 days), "+1w" (1 week)
+/// - Absolute: "2025-12-31" or "2025-12-31T23:59:59"
+///
+/// Returns None if parsing fails.
+fn parse_expiration(expires: &str) -> Option<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let expires = expires.trim();
+
+    // Relative time format: +Nm, +Nh, +Nd, +Nw
+    if expires.starts_with('+') {
+        let suffix = expires.chars().last()?;
+        let value: u64 = expires[1..expires.len() - 1].parse().ok()?;
+
+        let seconds = match suffix {
+            'm' => value * 60,
+            'h' => value * 60 * 60,
+            'd' => value * 60 * 60 * 24,
+            'w' => value * 60 * 60 * 24 * 7,
+            _ => return None,
+        };
+
+        return Some(now + seconds);
+    }
+
+    // Absolute date format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
+    // Simple parsing without external crates
+    let parts: Vec<&str> = expires.split('T').collect();
+
+    let date_parts: Vec<u32> = parts[0]
+        .split('-')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    if date_parts.len() != 3 {
+        return None;
+    }
+
+    let (year, month, day) = (date_parts[0], date_parts[1], date_parts[2]);
+
+    let (hour, minute, second) = if parts.len() > 1 {
+        let time_parts: Vec<u32> = parts[1]
+            .split(':')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if time_parts.len() >= 2 {
+            (
+                time_parts[0],
+                time_parts[1],
+                time_parts.get(2).copied().unwrap_or(0),
+            )
+        } else {
+            (23, 59, 59) // End of day if no time specified
+        }
+    } else {
+        (23, 59, 59) // End of day if no time specified
+    };
+
+    // Convert to timestamp (simplified calculation - doesn't handle all edge cases)
+    // Days since 1970-01-01
+    let mut days: i64 = 0;
+
+    // Add years
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+
+    // Add months
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 1..month {
+        days += month_days[(m - 1) as usize] as i64;
+        if m == 2 && is_leap_year(year) {
+            days += 1;
+        }
+    }
+
+    // Add days
+    days += (day - 1) as i64;
+
+    let timestamp = days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+
+    if timestamp < 0 {
+        return None;
+    }
+
+    Some(timestamp as u64)
+}
+
+/// Helper function to check if a year is a leap year.
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Generates new key pairs (encryption + signing) and saves to files.
@@ -342,6 +451,7 @@ fn encode_cmd(
     qr_format: &str,
     sign_key_path: Option<&PathBuf>,
     min_coverage: u8,
+    expires: Option<&str>,
 ) -> Result<()> {
     // Load carrier with auto-detection based on file extension
     let carrier = Carrier::from_file(carrier_path)
@@ -367,10 +477,31 @@ fn encode_cmd(
         None
     };
 
+    // Parse expiration time if provided
+    let expires_at = if let Some(exp_str) = expires {
+        let ts = parse_expiration(exp_str)
+            .with_context(|| format!("Invalid expiration format: '{}'. Use '+30m', '+24h', '+7d', or '2025-12-31'", exp_str))?;
+        if verbose {
+            // Format timestamp for display
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let remaining = ts.saturating_sub(now);
+            let hours = remaining / 3600;
+            let mins = (remaining % 3600) / 60;
+            eprintln!("Message expires in {}h {}m (timestamp: {})", hours, mins, ts);
+        }
+        Some(ts)
+    } else {
+        None
+    };
+
     let config = EncoderConfig {
         verbose,
         signing_key: signing_key.as_ref(),
         min_coverage: min_coverage as f64 / 100.0,
+        expires_at,
     };
 
     // Determine if we're encoding text or binary
