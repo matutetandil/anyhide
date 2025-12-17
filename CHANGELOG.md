@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2025-12-17
+
+### Security
+
+- **Fixed: Duress password now signs both messages**
+  - Previously only the real message was signed, decoy had no signature
+  - An attacker who knows the sender always signs could distinguish real from decoy
+  - Now both real and decoy messages are signed with the same key
+  - Messages are now indistinguishable based on signature presence
+
+### Added
+
+- Test to verify both messages are signed when using duress password with `--sign`
+
 ## [0.9.0] - 2025-12-17
 
 ### Added

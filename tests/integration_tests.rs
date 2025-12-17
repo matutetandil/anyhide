@@ -811,3 +811,49 @@ fn test_duress_password_decoy_message() {
     assert!(!decoded_wrong.message.to_lowercase().contains("secret"));
     assert!(!decoded_wrong.message.to_lowercase().contains("birthday"));
 }
+
+/// Test that duress password signs BOTH messages (real and decoy)
+/// This is critical for security - if only real is signed, attacker can distinguish them
+#[test]
+fn test_duress_password_signs_both_messages() {
+    use anyhide::{DecoyConfig, EncoderConfig, decode_with_config, DecoderConfig};
+    use anyhide::crypto::SigningKeyPair;
+
+    let carrier = "Hello world! Secret meeting birthday party celebration test message";
+    let real_message = "Secret";
+    let decoy_message = "birthday";
+    let real_pass = "realpass";
+    let decoy_pass = "fakepass";
+
+    let keypair = KeyPair::generate();
+    let signing_keypair = SigningKeyPair::generate();
+
+    // Encode with decoy AND signing
+    let config = EncoderConfig {
+        signing_key: Some(signing_keypair.signing_key()),
+        decoy: Some(DecoyConfig {
+            message: decoy_message,
+            passphrase: decoy_pass,
+        }),
+        ..Default::default()
+    };
+
+    let encoded = encode_with_config(carrier, real_message, real_pass, keypair.public_key(), &config)
+        .expect("Encoding should succeed");
+
+    // Decoder config with verifying key
+    let decoder_config = DecoderConfig {
+        verifying_key: Some(signing_keypair.verifying_key()),
+        ..Default::default()
+    };
+
+    // Decode real message - should have valid signature
+    let decoded_real = decode_with_config(&encoded.code, carrier, real_pass, keypair.secret_key(), &decoder_config);
+    assert!(decoded_real.message.to_lowercase().contains("secret"));
+    assert_eq!(decoded_real.signature_valid, Some(true), "Real message should have valid signature");
+
+    // Decode decoy message - should ALSO have valid signature (indistinguishable)
+    let decoded_decoy = decode_with_config(&encoded.code, carrier, decoy_pass, keypair.secret_key(), &decoder_config);
+    assert!(decoded_decoy.message.to_lowercase().contains("birthday"));
+    assert_eq!(decoded_decoy.signature_valid, Some(true), "Decoy message MUST also have valid signature for security");
+}

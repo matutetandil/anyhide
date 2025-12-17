@@ -469,9 +469,10 @@ pub fn encode_with_config(
         }
 
         // Create a config for decoy without the decoy field (no recursion)
+        // IMPORTANT: Sign decoy with same key to prevent distinguishing real vs decoy
         let decoy_encoder_config = EncoderConfig {
             verbose: config.verbose,
-            signing_key: None, // Don't sign decoy - keeps it simpler
+            signing_key: config.signing_key, // Sign decoy too for indistinguishability
             min_coverage: config.min_coverage,
             expires_at: config.expires_at,
             ratchet: false, // Don't ratchet decoy
@@ -597,9 +598,10 @@ pub fn encode_with_carrier_config(
         }
 
         // Create a config for decoy without decoy field (no recursion)
+        // IMPORTANT: Sign decoy with same key to prevent distinguishing real vs decoy
         let decoy_encoder_config = EncoderConfig {
             verbose: config.verbose,
-            signing_key: None, // Don't sign decoy
+            signing_key: config.signing_key, // Sign decoy too for indistinguishability
             min_coverage: config.min_coverage,
             expires_at: config.expires_at,
             ratchet: false, // Don't ratchet decoy
