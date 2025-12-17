@@ -541,6 +541,7 @@ fn test_ratchet_generates_next_keypair() {
         min_coverage: 1.0,
         expires_at: None,
         ratchet: true,
+        decoy: None,
     };
 
     let encoded = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config)
@@ -587,6 +588,7 @@ fn test_decode_extracts_next_public_key() {
         min_coverage: 1.0,
         expires_at: None,
         ratchet: true,
+        decoy: None,
     };
 
     let encoded = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config)
@@ -765,4 +767,47 @@ fn test_key_fingerprint_consistency() {
 
     // Different keys = different fingerprints
     assert_ne!(fp1, fp2);
+}
+
+/// Test duress password (decoy message)
+#[test]
+fn test_duress_password_decoy_message() {
+    use anyhide::{DecoyConfig, EncoderConfig};
+
+    let carrier = "Hello world! Secret meeting birthday party celebration test message";
+    let real_message = "Secret";
+    let decoy_message = "birthday";
+    let real_pass = "realpass";
+    let decoy_pass = "fakepass";
+    let wrong_pass = "wrongpass";
+
+    let keypair = KeyPair::generate();
+
+    // Encode with decoy
+    let config = EncoderConfig {
+        decoy: Some(DecoyConfig {
+            message: decoy_message,
+            passphrase: decoy_pass,
+        }),
+        ..Default::default()
+    };
+
+    let encoded = encode_with_config(carrier, real_message, real_pass, keypair.public_key(), &config)
+        .expect("Encoding should succeed");
+
+    // Code should contain dot separator
+    assert!(encoded.code.contains('.'), "Code should contain dot separator for duress");
+
+    // Decode with real passphrase → real message
+    let decoded_real = decode(&encoded.code, carrier, real_pass, keypair.secret_key());
+    assert!(decoded_real.message.to_lowercase().contains("secret"));
+
+    // Decode with decoy passphrase → decoy message
+    let decoded_decoy = decode(&encoded.code, carrier, decoy_pass, keypair.secret_key());
+    assert!(decoded_decoy.message.to_lowercase().contains("birthday"));
+
+    // Decode with wrong passphrase → garbage (neither message)
+    let decoded_wrong = decode(&encoded.code, carrier, wrong_pass, keypair.secret_key());
+    assert!(!decoded_wrong.message.to_lowercase().contains("secret"));
+    assert!(!decoded_wrong.message.to_lowercase().contains("birthday"));
 }

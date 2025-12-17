@@ -151,11 +151,71 @@ pub fn decode_with_config(
     secret_key: &StaticSecret,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
+    let code = code.trim();
+
+    // Handle duress password: if code contains '.', it has a decoy
+    // Try to decode each part with the given passphrase
+    if code.contains('.') {
+        if config.verbose {
+            eprintln!("Code contains duress marker, trying multiple payloads...");
+        }
+
+        let parts: Vec<&str> = code.split('.').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if config.verbose {
+                eprintln!("Trying payload {}...", i + 1);
+            }
+
+            // Try to decode this part (without duress handling to avoid infinite recursion)
+            let result = decode_single_payload(part, carrier, passphrase, secret_key, config);
+
+            // Check if decryption succeeded by seeing if it's not a fallback
+            // We detect success by checking if the decryption/deserialization worked
+            // Since we can't easily tell, we try each and return the first one that
+            // produces a valid-looking result
+            if result.is_valid_decode {
+                if config.verbose {
+                    eprintln!("Payload {} decoded successfully", i + 1);
+                }
+                return result.message;
+            }
+        }
+
+        // None of the payloads worked - return fallback
+        if config.verbose {
+            eprintln!("No payload matched, generating fallback");
+        }
+        let carrier_search = CarrierSearch::new(carrier.trim());
+        return generate_fallback_from_carrier(code, passphrase, &carrier_search);
+    }
+
+    // Single payload (no duress) - decode normally
+    let result = decode_single_payload(code, carrier, passphrase, secret_key, config);
+    result.message
+}
+
+/// Internal result that tracks whether decode succeeded or fell back to garbage.
+struct DecodeAttempt {
+    message: DecodedMessage,
+    is_valid_decode: bool,
+}
+
+/// Attempts to decode a single payload (no duress handling).
+fn decode_single_payload(
+    code: &str,
+    carrier: &str,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig<'_>,
+) -> DecodeAttempt {
     let carrier = carrier.trim();
     let carrier_search = CarrierSearch::new(carrier);
 
     if carrier_search.is_empty() {
-        return generate_fallback_output(code, passphrase, "empty_carrier");
+        return DecodeAttempt {
+            message: generate_fallback_output(code, passphrase, "empty_carrier"),
+            is_valid_decode: false,
+        };
     }
 
     // Step 1: Decode base64
@@ -165,7 +225,10 @@ pub fn decode_with_config(
             if config.verbose {
                 eprintln!("Base64 decode failed, generating fallback");
             }
-            return generate_fallback_from_carrier(code, passphrase, &carrier_search);
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, &carrier_search),
+                is_valid_decode: false,
+            };
         }
     };
 
@@ -180,7 +243,10 @@ pub fn decode_with_config(
             if config.verbose {
                 eprintln!("Decryption failed, generating fallback");
             }
-            return generate_fallback_from_carrier(code, passphrase, &carrier_search);
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, &carrier_search),
+                is_valid_decode: false,
+            };
         }
     };
 
@@ -195,7 +261,10 @@ pub fn decode_with_config(
             if config.verbose {
                 eprintln!("Deserialization failed, generating fallback");
             }
-            return generate_fallback_from_carrier(code, passphrase, &carrier_search);
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, &carrier_search),
+                is_valid_decode: false,
+            };
         }
     };
 
@@ -223,7 +292,10 @@ pub fn decode_with_config(
         if config.verbose {
             eprintln!("Invalid real_count, generating fallback");
         }
-        return generate_fallback_from_carrier(code, passphrase, &carrier_search);
+        return DecodeAttempt {
+            message: generate_fallback_from_carrier(code, passphrase, &carrier_search),
+            is_valid_decode: false,
+        };
     }
 
     let real_fragments = &data.fragments[..real_count];
@@ -275,11 +347,14 @@ pub fn decode_with_config(
         eprintln!("Forward secrecy: Sender included next public key for reply");
     }
 
-    DecodedMessage {
-        message,
-        fragments: extracted_fragments,
-        signature_valid,
-        next_public_key,
+    DecodeAttempt {
+        message: DecodedMessage {
+            message,
+            fragments: extracted_fragments,
+            signature_valid,
+            next_public_key,
+        },
+        is_valid_decode: true,
     }
 }
 
@@ -382,6 +457,45 @@ pub fn decode_with_carrier_config(
     secret_key: &StaticSecret,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
+    let code = code.trim();
+
+    // Handle duress password: if code contains '.', it has a decoy
+    if code.contains('.') {
+        if config.verbose {
+            eprintln!("Code contains duress marker, trying multiple payloads...");
+        }
+
+        let parts: Vec<&str> = code.split('.').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if config.verbose {
+                eprintln!("Trying payload {}...", i + 1);
+            }
+
+            let result = match carrier {
+                Carrier::Text(text_carrier) => {
+                    decode_text_carrier_attempt(part, text_carrier, passphrase, secret_key, config)
+                }
+                Carrier::Binary(binary_carrier) => {
+                    decode_binary_carrier_attempt(part, binary_carrier, passphrase, secret_key, config)
+                }
+            };
+
+            if result.is_valid_decode {
+                if config.verbose {
+                    eprintln!("Payload {} decoded successfully", i + 1);
+                }
+                return result.message;
+            }
+        }
+
+        // None worked - fallback
+        if config.verbose {
+            eprintln!("No payload matched, generating fallback");
+        }
+        return generate_fallback_output(code, passphrase, "no_valid_payload");
+    }
+
+    // Single payload - decode normally
     match carrier {
         Carrier::Text(text_carrier) => {
             decode_text_carrier(code, text_carrier, passphrase, secret_key, config)
@@ -544,6 +658,58 @@ fn decode_text_carrier(
     }
 }
 
+/// Decodes using a text carrier (internal) - returns attempt result for duress detection.
+fn decode_text_carrier_attempt(
+    code: &str,
+    carrier: &CarrierSearch,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig<'_>,
+) -> DecodeAttempt {
+    if carrier.is_empty() {
+        return DecodeAttempt {
+            message: generate_fallback_output(code, passphrase, "empty_carrier"),
+            is_valid_decode: false,
+        };
+    }
+
+    let encrypted = match BASE64.decode(code.trim()) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    let _data: EncodedData = match bincode::deserialize(&decrypted) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    // If we got here, decode was successful
+    DecodeAttempt {
+        message: decode_text_carrier(code, carrier, passphrase, secret_key, config),
+        is_valid_decode: true,
+    }
+}
+
 /// Decodes using a binary carrier.
 fn decode_binary_carrier(
     code: &str,
@@ -696,6 +862,58 @@ fn decode_binary_carrier(
         fragments: extracted_fragments,
         signature_valid,
         next_public_key,
+    }
+}
+
+/// Decodes using a binary carrier (internal) - returns attempt result for duress detection.
+fn decode_binary_carrier_attempt(
+    code: &str,
+    carrier: &BinaryCarrierSearch,
+    passphrase: &str,
+    secret_key: &StaticSecret,
+    config: &DecoderConfig<'_>,
+) -> DecodeAttempt {
+    if carrier.is_empty() {
+        return DecodeAttempt {
+            message: generate_fallback_output(code, passphrase, "empty_binary_carrier"),
+            is_valid_decode: false,
+        };
+    }
+
+    let encrypted = match BASE64.decode(code.trim()) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_binary_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_binary_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    let _data: EncodedData = match bincode::deserialize(&decrypted) {
+        Ok(data) => data,
+        Err(_) => {
+            return DecodeAttempt {
+                message: generate_fallback_from_binary_carrier(code, passphrase, carrier),
+                is_valid_decode: false,
+            };
+        }
+    };
+
+    // If we got here, decode was successful
+    DecodeAttempt {
+        message: decode_binary_carrier(code, carrier, passphrase, secret_key, config),
+        is_valid_decode: true,
     }
 }
 

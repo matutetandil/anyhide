@@ -13,7 +13,7 @@ use anyhide::crypto::{
     load_public_key_for_contact, save_private_key_for_contact,
 };
 use anyhide::qr::{generate_qr_to_file, qr_capacity_info, QrConfig, QrFormat};
-use anyhide::{encode_with_carrier_config, encode_bytes_with_carrier_config, Carrier, EncoderConfig};
+use anyhide::{encode_with_carrier_config, encode_bytes_with_carrier_config, Carrier, EncoderConfig, DecoyConfig};
 
 use super::CommandExecutor;
 
@@ -120,6 +120,17 @@ pub struct EncodeCommand {
     /// You should update your ephemeral key storage after encoding.
     #[arg(long)]
     pub ratchet: bool,
+
+    /// Decoy message for duress password (plausible deniability)
+    /// If someone forces you to reveal the passphrase, give them --decoy-pass
+    /// and they'll see this innocent message instead of the real one.
+    #[arg(long, requires = "decoy_pass")]
+    pub decoy: Option<String>,
+
+    /// Passphrase for the decoy message
+    /// Use this to decode the decoy message instead of the real one.
+    #[arg(long, requires = "decoy")]
+    pub decoy_pass: Option<String>,
 }
 
 impl CommandExecutor for EncodeCommand {
@@ -182,12 +193,27 @@ impl CommandExecutor for EncodeCommand {
             None
         };
 
+        // Build decoy config if provided
+        let decoy_config = match (&self.decoy, &self.decoy_pass) {
+            (Some(decoy_msg), Some(decoy_passphrase)) => {
+                if self.verbose {
+                    eprintln!("Duress password enabled with decoy message");
+                }
+                Some(DecoyConfig {
+                    message: decoy_msg,
+                    passphrase: decoy_passphrase,
+                })
+            }
+            _ => None,
+        };
+
         let config = EncoderConfig {
             verbose: self.verbose,
             signing_key: signing_key.as_ref(),
             min_coverage: self.min_coverage as f64 / 100.0,
             expires_at,
             ratchet: self.ratchet,
+            decoy: decoy_config,
         };
 
         // Determine if we're encoding text or binary

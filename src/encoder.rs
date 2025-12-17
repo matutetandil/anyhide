@@ -97,6 +97,15 @@ pub struct EncodedMessage {
     pub next_keypair: Option<KeyPair>,
 }
 
+/// Configuration for a decoy message (duress password feature).
+#[derive(Debug, Clone)]
+pub struct DecoyConfig<'a> {
+    /// The decoy message to encode.
+    pub message: &'a str,
+    /// The passphrase for the decoy message.
+    pub passphrase: &'a str,
+}
+
 /// Configuration for the encoder.
 #[derive(Debug, Clone)]
 pub struct EncoderConfig<'a> {
@@ -117,6 +126,10 @@ pub struct EncoderConfig<'a> {
     /// The next_public_key is included in the encrypted data for the recipient to use
     /// in their reply, and next_keypair is returned for the sender to save.
     pub ratchet: bool,
+    /// Optional decoy message configuration (duress password).
+    /// If provided, a second message is encoded with a different passphrase.
+    /// Using the decoy passphrase reveals the decoy message instead of the real one.
+    pub decoy: Option<DecoyConfig<'a>>,
 }
 
 impl Default for EncoderConfig<'_> {
@@ -127,6 +140,7 @@ impl Default for EncoderConfig<'_> {
             min_coverage: 1.0, // 100% by default - maximum security
             expires_at: None,
             ratchet: false,
+            decoy: None,
         }
     }
 }
@@ -446,7 +460,42 @@ pub fn encode_with_config(
     let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
 
     // Step 10: Encode to base64
-    let code = BASE64.encode(&encrypted);
+    let primary_code = BASE64.encode(&encrypted);
+
+    // Step 11: Handle decoy message if present
+    let code = if let Some(ref decoy_config) = config.decoy {
+        if config.verbose {
+            eprintln!("Encoding decoy message with separate passphrase...");
+        }
+
+        // Create a config for decoy without the decoy field (no recursion)
+        let decoy_encoder_config = EncoderConfig {
+            verbose: config.verbose,
+            signing_key: None, // Don't sign decoy - keeps it simpler
+            min_coverage: config.min_coverage,
+            expires_at: config.expires_at,
+            ratchet: false, // Don't ratchet decoy
+            decoy: None,    // No nested decoys
+        };
+
+        // Encode the decoy message with its own passphrase
+        let decoy_result = encode_with_config(
+            carrier,
+            decoy_config.message,
+            decoy_config.passphrase,
+            public_key,
+            &decoy_encoder_config,
+        )?;
+
+        if config.verbose {
+            eprintln!("Decoy encoded successfully");
+        }
+
+        // Combine: real.decoy (dot separator not in base64 alphabet)
+        format!("{}.{}", primary_code, decoy_result.code)
+    } else {
+        primary_code
+    };
 
     Ok(EncodedMessage {
         code,
@@ -531,13 +580,54 @@ pub fn encode_with_carrier_config(
     public_key: &PublicKey,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
-    match carrier {
+    // Encode the primary message
+    let primary_result = match carrier {
         Carrier::Text(text_carrier) => {
             encode_text_carrier(text_carrier, message, passphrase, public_key, config)
         }
         Carrier::Binary(binary_carrier) => {
             encode_binary_carrier(binary_carrier, message, passphrase, public_key, config)
         }
+    }?;
+
+    // If there's a decoy, encode it too and combine the codes
+    if let Some(ref decoy_config) = config.decoy {
+        if config.verbose {
+            eprintln!("Encoding decoy message with separate passphrase...");
+        }
+
+        // Create a config for decoy without decoy field (no recursion)
+        let decoy_encoder_config = EncoderConfig {
+            verbose: config.verbose,
+            signing_key: None, // Don't sign decoy
+            min_coverage: config.min_coverage,
+            expires_at: config.expires_at,
+            ratchet: false, // Don't ratchet decoy
+            decoy: None,    // No nested decoys
+        };
+
+        let decoy_result = match carrier {
+            Carrier::Text(text_carrier) => {
+                encode_text_carrier(text_carrier, decoy_config.message, decoy_config.passphrase, public_key, &decoy_encoder_config)
+            }
+            Carrier::Binary(binary_carrier) => {
+                encode_binary_carrier(binary_carrier, decoy_config.message, decoy_config.passphrase, public_key, &decoy_encoder_config)
+            }
+        }?;
+
+        if config.verbose {
+            eprintln!("Decoy encoded successfully");
+        }
+
+        // Combine: real.decoy (dot separator not in base64 alphabet)
+        Ok(EncodedMessage {
+            code: format!("{}.{}", primary_result.code, decoy_result.code),
+            real_fragment_count: primary_result.real_fragment_count,
+            total_fragments: primary_result.total_fragments,
+            next_keypair: primary_result.next_keypair,
+        })
+    } else {
+        Ok(primary_result)
     }
 }
 
@@ -1193,6 +1283,7 @@ mod tests {
             min_coverage: 0.0, // Allow any coverage
             expires_at: None,
             ratchet: false,
+            decoy: None,
         };
         let result = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config);
 

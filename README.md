@@ -55,6 +55,7 @@ Anyhide uses a **pre-shared carrier** model:
 - **Forward secrecy ratchet**: Key rotation per message - past messages stay secure even if keys leak
 - **Ephemeral keys**: Generate rotating keys for perfect forward secrecy
 - **Key fingerprints**: Verify keys out-of-band (hex, emoji, visual art)
+- **Duress password**: Two messages, two passphrases - reveal the decoy under coercion
 - **Message signing**: Ed25519 signatures for sender authentication
 - **Message expiration**: Auto-expiring messages
 - **Code splitting**: Split codes for multi-channel delivery
@@ -175,6 +176,10 @@ Key options (choose one):
 Ratchet options:
   --ratchet                Enable forward secrecy (auto key rotation)
   --my-key <PATH>          Your private key (for auto-saving next keypair)
+
+Duress password (plausible deniability):
+  --decoy <MESSAGE>        Decoy message revealed with --decoy-pass
+  --decoy-pass <PASS>      Passphrase for the decoy message
 
 Other options:
   --sign <PATH>            Sign with Ed25519 key
