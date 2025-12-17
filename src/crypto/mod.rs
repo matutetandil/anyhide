@@ -11,6 +11,7 @@
 
 pub mod asymmetric;
 pub mod compression;
+pub mod ephemeral_store;
 pub mod keys;
 pub mod multi_recipient;
 pub mod signing;
@@ -18,7 +19,25 @@ pub mod symmetric;
 
 pub use asymmetric::{decrypt, decrypt_from_bytes, encrypt, encrypt_to_bytes, AsymmetricError, EncryptedData};
 pub use compression::{compress, decompress, CompressionError};
-pub use keys::{decode_public_key_pem, decode_secret_key_pem, load_public_key, load_secret_key, KeyError, KeyPair};
+pub use ephemeral_store::{
+    load_private_key_for_contact, load_public_key_for_contact, load_unified_keys_for_contact,
+    save_private_key_for_contact, save_public_key_for_contact, save_unified_keys_for_contact,
+    update_unified_public_key, update_unified_private_key,
+    list_private_key_contacts, list_public_key_contacts, list_unified_contacts,
+    generate_and_save_ephemeral_for_contact,
+    ContactKeys, EphemeralStoreError, EphemeralStoreFormat,
+};
+pub use keys::{
+    decode_public_key_pem, decode_public_key_pem_with_type,
+    decode_secret_key_pem, decode_secret_key_pem_with_type,
+    detect_key_type,
+    encode_ephemeral_public_key_pem, encode_ephemeral_secret_key_pem,
+    encode_public_key_pem, encode_public_key_pem_with_type,
+    encode_secret_key_pem, encode_secret_key_pem_with_type,
+    load_public_key, load_public_key_with_type,
+    load_secret_key, load_secret_key_with_type,
+    KeyError, KeyPair, KeyType,
+};
 pub use multi_recipient::{decrypt_multi, encrypt_multi, MultiRecipientData, MultiRecipientError};
 pub use signing::{
     decode_signing_key_pem, decode_verifying_key_pem, load_signing_key, load_verifying_key,

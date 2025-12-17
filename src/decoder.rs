@@ -38,6 +38,10 @@ pub struct DecodedMessage {
     /// - Some(true): Signature verified successfully
     /// - Some(false): Signature verification FAILED (message may be tampered)
     pub signature_valid: Option<bool>,
+    /// Next public key for forward secrecy ratchet.
+    /// If present, the sender wants you to use this key for your reply.
+    /// This enables perfect forward secrecy by rotating keys each message.
+    pub next_public_key: Option<Vec<u8>>,
 }
 
 /// Result of decoding binary data.
@@ -53,6 +57,10 @@ pub struct DecodedBytes {
     /// - Some(true): Signature verified successfully
     /// - Some(false): Signature verification FAILED (data may be tampered)
     pub signature_valid: Option<bool>,
+    /// Next public key for forward secrecy ratchet.
+    /// If present, the sender wants you to use this key for your reply.
+    /// This enables perfect forward secrecy by rotating keys each message.
+    pub next_public_key: Option<Vec<u8>>,
 }
 
 /// Configuration for the decoder.
@@ -261,10 +269,17 @@ pub fn decode_with_config(
         config.verbose,
     );
 
+    // Step 9: Extract next_public_key for forward secrecy ratchet
+    let next_public_key = data.next_public_key.clone();
+    if config.verbose && next_public_key.is_some() {
+        eprintln!("Forward secrecy: Sender included next public key for reply");
+    }
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
         signature_valid,
+        next_public_key,
     }
 }
 
@@ -288,6 +303,7 @@ fn generate_fallback_output(code: &str, passphrase: &str, context: &str) -> Deco
         message: garbage.clone(),
         fragments: vec![garbage],
         signature_valid: None,
+        next_public_key: None,
     }
 }
 
@@ -330,6 +346,7 @@ fn generate_fallback_from_carrier(
         message,
         fragments,
         signature_valid: None,
+        next_public_key: None,
     }
 }
 
@@ -513,10 +530,17 @@ fn decode_text_carrier(
         config.verbose,
     );
 
+    // Extract next_public_key for forward secrecy ratchet
+    let next_public_key = data.next_public_key.clone();
+    if config.verbose && next_public_key.is_some() {
+        eprintln!("Forward secrecy: Sender included next public key for reply");
+    }
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
         signature_valid,
+        next_public_key,
     }
 }
 
@@ -661,10 +685,17 @@ fn decode_binary_carrier(
         config.verbose,
     );
 
+    // Extract next_public_key for forward secrecy ratchet
+    let next_public_key = data.next_public_key.clone();
+    if config.verbose && next_public_key.is_some() {
+        eprintln!("Forward secrecy: Sender included next public key for reply");
+    }
+
     DecodedMessage {
         message,
         fragments: extracted_fragments,
         signature_valid,
+        next_public_key,
     }
 }
 
@@ -708,6 +739,7 @@ fn generate_fallback_from_binary_carrier(
         message,
         fragments,
         signature_valid: None,
+        next_public_key: None,
     }
 }
 
@@ -893,10 +925,17 @@ fn decode_bytes_binary_carrier(
         config.verbose,
     );
 
+    // Extract next_public_key for forward secrecy ratchet
+    let next_public_key = data.next_public_key.clone();
+    if config.verbose && next_public_key.is_some() {
+        eprintln!("Forward secrecy: Sender included next public key for reply");
+    }
+
     DecodedBytes {
         data: all_bytes,
         fragments: extracted_fragments,
         signature_valid,
+        next_public_key,
     }
 }
 
@@ -915,6 +954,7 @@ fn generate_fallback_bytes(code: &str, passphrase: &str, context: &str) -> Decod
         data: garbage.clone(),
         fragments: vec![garbage],
         signature_valid: None,
+        next_public_key: None,
     }
 }
 
@@ -957,6 +997,7 @@ fn generate_fallback_bytes_from_carrier(
         data: all_bytes,
         fragments,
         signature_valid: None,
+        next_public_key: None,
     }
 }
 

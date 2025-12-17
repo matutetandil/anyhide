@@ -82,7 +82,26 @@ pub mod qr;
 pub mod text;
 
 // Re-export commonly used types at the crate root
-pub use crypto::{KeyPair, SigningKeyPair};
+pub use crypto::{KeyPair, KeyType, SigningKeyPair};
+
+// Re-export ephemeral key functions for forward secrecy ratchet
+pub use crypto::{
+    encode_ephemeral_public_key_pem, encode_ephemeral_secret_key_pem,
+    decode_public_key_pem_with_type, decode_secret_key_pem_with_type,
+    load_public_key_with_type, load_secret_key_with_type,
+    detect_key_type,
+};
+
+// Re-export ephemeral store for managing contact keys
+pub use crypto::{
+    ContactKeys, EphemeralStoreError, EphemeralStoreFormat,
+    load_unified_keys_for_contact, save_unified_keys_for_contact,
+    update_unified_public_key, update_unified_private_key,
+    load_private_key_for_contact, save_private_key_for_contact,
+    load_public_key_for_contact, save_public_key_for_contact,
+    list_unified_contacts, list_private_key_contacts, list_public_key_contacts,
+    generate_and_save_ephemeral_for_contact,
+};
 pub use decoder::{
     decode, decode_bytes_with_carrier, decode_bytes_with_carrier_config, decode_with_carrier,
     decode_with_carrier_config, decode_with_config, DecodedBytes, DecodedMessage, DecoderConfig,

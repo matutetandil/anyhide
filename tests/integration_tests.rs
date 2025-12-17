@@ -10,7 +10,7 @@
 //! - Block padding (message length hidden)
 
 use anyhide::crypto::KeyPair;
-use anyhide::{decode, encode};
+use anyhide::{decode, encode, encode_with_config};
 
 /// Test basic encode/decode roundtrip
 #[test]
@@ -517,4 +517,109 @@ fn test_simulated_file_encoding() {
     // Should recover exact bytes
     assert_eq!(decoded.data, file_content);
     assert_eq!(&decoded.data[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic
+}
+
+// ============================================================================
+// Forward Secrecy Ratchet Tests
+// ============================================================================
+
+/// Test encoding with ratchet generates next keypair
+#[test]
+fn test_ratchet_generates_next_keypair() {
+    use anyhide::EncoderConfig;
+
+    let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+    let message = "ama parque";
+    let passphrase = "secret";
+
+    let keypair = KeyPair::generate();
+
+    // Encode WITH ratchet
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: true,
+    };
+
+    let encoded = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config)
+        .expect("Encoding should succeed");
+
+    // Should have generated next_keypair
+    assert!(encoded.next_keypair.is_some());
+    let next_keypair = encoded.next_keypair.unwrap();
+    assert!(next_keypair.is_ephemeral());
+}
+
+/// Test encoding without ratchet does not generate next keypair
+#[test]
+fn test_no_ratchet_no_next_keypair() {
+    let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+    let message = "ama parque";
+    let passphrase = "secret";
+
+    let keypair = KeyPair::generate();
+
+    // Encode WITHOUT ratchet (default)
+    let encoded = encode(carrier, message, passphrase, keypair.public_key())
+        .expect("Encoding should succeed");
+
+    // Should NOT have next_keypair
+    assert!(encoded.next_keypair.is_none());
+}
+
+/// Test decoded message contains next_public_key when ratchet is used
+#[test]
+fn test_decode_extracts_next_public_key() {
+    use anyhide::EncoderConfig;
+
+    let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+    let message = "ama parque";
+    let passphrase = "secret";
+
+    let keypair = KeyPair::generate();
+
+    // Encode with ratchet
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: true,
+    };
+
+    let encoded = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config)
+        .expect("Encoding should succeed");
+
+    // Get the next public key from encoder result
+    let next_keypair = encoded.next_keypair.as_ref().unwrap();
+    let expected_next_public = next_keypair.public_key().as_bytes().to_vec();
+
+    // Decode
+    let decoded = decode(&encoded.code, carrier, passphrase, keypair.secret_key());
+
+    // Decoded message should contain the next_public_key
+    assert!(decoded.next_public_key.is_some());
+    assert_eq!(decoded.next_public_key.unwrap(), expected_next_public);
+}
+
+/// Test decode without ratchet has no next_public_key
+#[test]
+fn test_decode_no_ratchet_no_next_public_key() {
+    let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+    let message = "ama parque";
+    let passphrase = "secret";
+
+    let keypair = KeyPair::generate();
+
+    // Encode without ratchet
+    let encoded = encode(carrier, message, passphrase, keypair.public_key())
+        .expect("Encoding should succeed");
+
+    // Decode
+    let decoded = decode(&encoded.code, carrier, passphrase, keypair.secret_key());
+
+    // Should NOT have next_public_key
+    assert!(decoded.next_public_key.is_none());
 }

@@ -81,6 +81,13 @@ pub struct EncodeCommand {
     /// Parts can be sent via different channels for extra security
     #[arg(long, value_parser = clap::value_parser!(u8).range(2..=10))]
     pub split: Option<u8>,
+
+    /// Enable forward secrecy ratchet (requires ephemeral keys)
+    /// A new ephemeral keypair is generated for each message.
+    /// The recipient receives next_public_key to use in their reply.
+    /// You should update your ephemeral key storage after encoding.
+    #[arg(long)]
+    pub ratchet: bool,
 }
 
 impl CommandExecutor for EncodeCommand {
@@ -133,6 +140,7 @@ impl CommandExecutor for EncodeCommand {
             signing_key: signing_key.as_ref(),
             min_coverage: self.min_coverage as f64 / 100.0,
             expires_at,
+            ratchet: self.ratchet,
         };
 
         // Determine if we're encoding text or binary
@@ -198,6 +206,19 @@ impl CommandExecutor for EncodeCommand {
                 "Encoded {} real fragments ({} total with padding)",
                 encoded.real_fragment_count, encoded.total_fragments
             );
+        }
+
+        // Handle forward secrecy ratchet - display new key info
+        if let Some(ref next_keypair) = encoded.next_keypair {
+            eprintln!();
+            eprintln!("Forward Secrecy Ratchet:");
+            eprintln!("  New ephemeral key generated for next message");
+            eprintln!("  Your next public key (recipient will use this for reply):");
+            use anyhide::crypto::encode_ephemeral_public_key_pem;
+            let pem = encode_ephemeral_public_key_pem(next_keypair.public_key());
+            eprintln!("{}", pem);
+            eprintln!("  IMPORTANT: Save this keypair for your next message!");
+            eprintln!("  The recipient's reply will be encrypted to this new key.");
         }
 
         // Generate QR code if requested

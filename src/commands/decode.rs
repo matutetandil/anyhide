@@ -177,6 +177,7 @@ impl DecodeCommand {
             }
 
             show_signature_status(decoded.signature_valid, self.verbose);
+            show_next_public_key(&decoded.next_public_key, self.verbose);
 
             if self.verbose {
                 eprintln!();
@@ -189,6 +190,7 @@ impl DecodeCommand {
             println!("{}", decoded.message);
 
             show_signature_status(decoded.signature_valid, self.verbose);
+            show_next_public_key(&decoded.next_public_key, self.verbose);
 
             if self.verbose {
                 eprintln!();
@@ -213,6 +215,32 @@ fn show_signature_status(signature_valid: Option<bool>, verbose: bool) {
                 eprintln!("Signature: None (message was not signed or no verifying key provided)");
             }
         }
+    }
+}
+
+/// Shows the next public key for forward secrecy ratchet.
+fn show_next_public_key(next_public_key: &Option<Vec<u8>>, verbose: bool) {
+    if let Some(key_bytes) = next_public_key {
+        eprintln!();
+        eprintln!("Forward Secrecy Ratchet:");
+        eprintln!("  Sender included their NEXT public key for your reply.");
+
+        // Convert bytes to X25519 PublicKey and encode as PEM
+        if key_bytes.len() == 32 {
+            let mut key_array = [0u8; 32];
+            key_array.copy_from_slice(key_bytes);
+            let public_key = x25519_dalek::PublicKey::from(key_array);
+
+            use anyhide::crypto::encode_ephemeral_public_key_pem;
+            let pem = encode_ephemeral_public_key_pem(&public_key);
+            eprintln!("  Use this key when replying to maintain forward secrecy:");
+            eprintln!("{}", pem);
+            eprintln!("  Save this key and use it with --key when encoding your reply.");
+        } else {
+            eprintln!("  (Invalid key length: {} bytes)", key_bytes.len());
+        }
+    } else if verbose {
+        eprintln!("Forward Secrecy: None (sender did not include next public key)");
     }
 }
 

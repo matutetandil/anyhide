@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2025-12-17
+
+### Added
+
+- **Forward Secrecy Ratchet**
+  - New `--ratchet` flag in encode command enables key rotation per message
+  - Each message includes sender's next public key for recipient's reply
+  - Compromised keys don't expose past messages (perfect forward secrecy)
+  - Works with both CLI and library usage
+
+- **Ephemeral Key Generation**
+  - New `--ephemeral` flag in keygen command generates ephemeral keys
+  - Ephemeral keys use distinct PEM headers: `ANYHIDE EPHEMERAL PUBLIC/PRIVATE KEY`
+  - `KeyPair::generate_ephemeral()` for library usage
+  - `KeyPair::is_ephemeral()` to check key type
+
+- **Ephemeral Key Storage Formats**
+  - Three flexible storage options for ephemeral keys:
+    - Individual files (like long-term keys but with ephemeral headers)
+    - Separate consolidated files (`.eph.key` + `.eph.pub`)
+    - Unified storage (`.eph` with both keys per contact)
+  - Auto-detection of format by file extension
+  - JSON-based storage for multi-contact management
+
+- **Contact Key Management**
+  - `--contact <name>` flag for keygen with consolidated storage
+  - `--eph-file`, `--eph-keys`, `--eph-pubs` options for storage paths
+  - Library functions: `save_unified_keys_for_contact`, `load_unified_keys_for_contact`
+  - `update_unified_public_key`, `update_unified_private_key` for ratchet updates
+  - `list_unified_contacts`, `list_private_key_contacts`, `list_public_key_contacts`
+
+- **Library Exports for Ratchet**
+  - All ratchet functionality available for library usage
+  - `EncoderConfig.ratchet` field to enable key rotation
+  - `EncodedMessage.next_keypair` returns new keypair for sender to save
+  - `DecodedMessage.next_public_key` returns sender's next key for replies
+  - PEM encoding functions: `encode_ephemeral_public_key_pem`, `encode_ephemeral_secret_key_pem`
+
+### Changed
+
+- `EncodedMessage` now includes `next_keypair: Option<KeyPair>` field
+- `DecodedMessage` now includes `next_public_key: Option<Vec<u8>>` field
+- `EncoderConfig` now includes `ratchet: bool` field (default: false)
+- `KeyPair` now implements `Debug` (with redacted private key for security)
+
+### Security Notes
+
+- **Ratchet maintains plausible deniability**: Wrong inputs still return garbage, not errors
+- **Long-term keys never auto-modified**: Only ephemeral keys rotate
+- **Backwards compatible**: Messages without ratchet still work normally
+- **Key type detection**: System distinguishes long-term from ephemeral keys by PEM headers
+
+### Examples
+
+```bash
+# Generate ephemeral keys for a contact (unified storage)
+anyhide keygen --ephemeral --contact bob --eph-file alice.eph
+
+# Encode with forward secrecy ratchet
+anyhide encode -c carrier.txt -m "secret" -p "pass" -k bob.pub --ratchet
+
+# Decode - shows next_public_key if sender used ratchet
+anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key
+# Output includes: "Forward Secrecy Ratchet: Sender included their NEXT public key..."
+
+# Library usage
+let config = EncoderConfig { ratchet: true, ..Default::default() };
+let encoded = encode_with_config(carrier, msg, pass, &pub_key, &config)?;
+if let Some(next) = encoded.next_keypair {
+    // Save next_keypair for your next message
+}
+```
+
 ## [0.7.1] - 2025-12-16
 
 ### Changed

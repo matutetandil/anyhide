@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::PublicKey;
 
-use crate::crypto::{encrypt_with_passphrase, sign_message, EncryptionError};
+use crate::crypto::{encrypt_with_passphrase, sign_message, EncryptionError, KeyPair};
 use crate::text::carrier::{fragment_bytes_for_carrier, fragment_message_for_binary, BinaryCarrierSearch, Carrier};
 use crate::text::fragment::{fragment_message_adaptive, FoundFragment};
 use crate::text::tokenize::{select_distributed_position, CarrierSearch};
@@ -75,6 +75,11 @@ pub struct EncodedData {
     /// If set and current time > expires_at, decoder returns garbage (plausible deniability).
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Next public key for forward secrecy ratchet.
+    /// If present, the recipient should use this key for their reply.
+    /// Only included when the sender is using ephemeral keys.
+    #[serde(default)]
+    pub next_public_key: Option<Vec<u8>>,
 }
 
 /// Result of encoding a message.
@@ -86,6 +91,10 @@ pub struct EncodedMessage {
     pub real_fragment_count: usize,
     /// Total fragments including padding (for debugging).
     pub total_fragments: usize,
+    /// New ephemeral keypair for forward secrecy ratchet.
+    /// Present only when `ratchet: true` was set in EncoderConfig.
+    /// The sender should save this keypair for the next message exchange.
+    pub next_keypair: Option<KeyPair>,
 }
 
 /// Configuration for the encoder.
@@ -103,6 +112,11 @@ pub struct EncoderConfig<'a> {
     /// Optional expiration timestamp (Unix seconds).
     /// If set, the message will be unreadable after this time.
     pub expires_at: Option<u64>,
+    /// Enable forward secrecy ratchet.
+    /// When true, a new ephemeral keypair is generated for each message.
+    /// The next_public_key is included in the encrypted data for the recipient to use
+    /// in their reply, and next_keypair is returned for the sender to save.
+    pub ratchet: bool,
 }
 
 impl Default for EncoderConfig<'_> {
@@ -112,6 +126,7 @@ impl Default for EncoderConfig<'_> {
             signing_key: None,
             min_coverage: 1.0, // 100% by default - maximum security
             expires_at: None,
+            ratchet: false,
         }
     }
 }
@@ -397,16 +412,29 @@ pub fn encode_with_config(
         None
     };
 
-    // Step 6: Create encoded data
+    // Step 6: Generate next ephemeral keypair if ratchet is enabled
+    let (next_public_key, next_keypair) = if config.ratchet {
+        let new_keypair = KeyPair::generate_ephemeral();
+        let public_bytes = new_keypair.public_key().as_bytes().to_vec();
+        if config.verbose {
+            eprintln!("Generated next ephemeral key for forward secrecy ratchet");
+        }
+        (Some(public_bytes), Some(new_keypair))
+    } else {
+        (None, None)
+    };
+
+    // Step 7: Create encoded data
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
         expires_at: config.expires_at,
+        next_public_key,
     };
 
-    // Step 7: Serialize
+    // Step 8: Serialize
     let serialized = bincode::serialize(&data)
         .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
 
@@ -414,16 +442,17 @@ pub fn encode_with_config(
         eprintln!("Serialized to {} bytes", serialized.len());
     }
 
-    // Step 8: Encrypt (symmetric with passphrase, then asymmetric with public key)
+    // Step 9: Encrypt (symmetric with passphrase, then asymmetric with public key)
     let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
 
-    // Step 9: Encode to base64
+    // Step 10: Encode to base64
     let code = BASE64.encode(&encrypted);
 
     Ok(EncodedMessage {
         code,
         real_fragment_count: real_count,
         total_fragments: all_fragments.len(),
+        next_keypair,
     })
 }
 
@@ -664,12 +693,25 @@ fn encode_text_carrier(
         None
     };
 
+    // Generate next ephemeral keypair if ratchet is enabled
+    let (next_public_key, next_keypair) = if config.ratchet {
+        let new_keypair = KeyPair::generate_ephemeral();
+        let public_bytes = new_keypair.public_key().as_bytes().to_vec();
+        if config.verbose {
+            eprintln!("Generated next ephemeral key for forward secrecy ratchet");
+        }
+        (Some(public_bytes), Some(new_keypair))
+    } else {
+        (None, None)
+    };
+
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
         expires_at: config.expires_at,
+        next_public_key,
     };
 
     let serialized = bincode::serialize(&data)
@@ -682,6 +724,7 @@ fn encode_text_carrier(
         code,
         real_fragment_count: real_count,
         total_fragments: all_fragments.len(),
+        next_keypair,
     })
 }
 
@@ -790,12 +833,25 @@ fn encode_binary_carrier(
         None
     };
 
+    // Generate next ephemeral keypair if ratchet is enabled
+    let (next_public_key, next_keypair) = if config.ratchet {
+        let new_keypair = KeyPair::generate_ephemeral();
+        let public_bytes = new_keypair.public_key().as_bytes().to_vec();
+        if config.verbose {
+            eprintln!("Generated next ephemeral key for forward secrecy ratchet");
+        }
+        (Some(public_bytes), Some(new_keypair))
+    } else {
+        (None, None)
+    };
+
     let data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
         expires_at: config.expires_at,
+        next_public_key,
     };
 
     let serialized = bincode::serialize(&data)
@@ -808,6 +864,7 @@ fn encode_binary_carrier(
         code,
         real_fragment_count: real_count,
         total_fragments: all_fragments.len(),
+        next_keypair,
     })
 }
 
@@ -1002,12 +1059,25 @@ fn encode_bytes_binary_carrier(
         None
     };
 
+    // Generate next ephemeral keypair if ratchet is enabled
+    let (next_public_key, next_keypair) = if config.ratchet {
+        let new_keypair = KeyPair::generate_ephemeral();
+        let public_bytes = new_keypair.public_key().as_bytes().to_vec();
+        if config.verbose {
+            eprintln!("Generated next ephemeral key for forward secrecy ratchet");
+        }
+        (Some(public_bytes), Some(new_keypair))
+    } else {
+        (None, None)
+    };
+
     let encoded_data = EncodedData {
         version: VERSION,
         real_count: real_count as u16,
         fragments: all_fragments.clone(),
         signature,
         expires_at: config.expires_at,
+        next_public_key,
     };
 
     let serialized = bincode::serialize(&encoded_data)
@@ -1020,6 +1090,7 @@ fn encode_bytes_binary_carrier(
         code,
         real_fragment_count: real_count,
         total_fragments: all_fragments.len(),
+        next_keypair,
     })
 }
 
@@ -1121,6 +1192,7 @@ mod tests {
             signing_key: None,
             min_coverage: 0.0, // Allow any coverage
             expires_at: None,
+            ratchet: false,
         };
         let result = encode_with_config(carrier, message, passphrase, keypair.public_key(), &config);
 

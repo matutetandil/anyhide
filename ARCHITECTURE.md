@@ -29,7 +29,8 @@ anyhide/
 │   │   ├── symmetric.rs     # Passphrase-based encryption (HKDF + ChaCha20)
 │   │   ├── signing.rs       # Ed25519 digital signatures
 │   │   ├── compression.rs   # DEFLATE message compression
-│   │   └── multi_recipient.rs # Multi-recipient encryption scheme
+│   │   ├── multi_recipient.rs # Multi-recipient encryption scheme
+│   │   └── ephemeral_store.rs # Contact key management for ratchet
 │   │
 │   ├── text/                # Text and carrier processing
 │   │   ├── mod.rs           # Module exports
@@ -125,6 +126,83 @@ let shared = ephemeral.diffie_hellman(&recipient_public);
 let shared = recipient_secret.diffie_hellman(&ephemeral_public);
 ```
 
+### Forward Secrecy Ratchet
+
+The ratchet provides key rotation per message:
+
+```rust
+// EncoderConfig with ratchet enabled
+let config = EncoderConfig {
+    ratchet: true,
+    ..Default::default()
+};
+
+// Encode generates next keypair
+let result = encode_with_config(..., &config);
+// result.next_keypair contains the next public/private key pair
+
+// EncodedData includes next_public_key
+struct EncodedData {
+    next_public_key: Option<Vec<u8>>,  // 32 bytes X25519 public key
+    // ...
+}
+```
+
+Ratchet workflow:
+1. Alice encodes with `--ratchet`, generates next keypair
+2. Message includes Alice's next public key (encrypted)
+3. Bob decodes, receives `next_public_key` for reply
+4. Bob uses that key for his reply
+5. Keys rotate with each message exchange
+
+Key types distinguished by PEM headers:
+- `ANYHIDE PUBLIC KEY` / `ANYHIDE PRIVATE KEY` - Static keys
+- `ANYHIDE EPHEMERAL PUBLIC KEY` / `ANYHIDE EPHEMERAL PRIVATE KEY` - Rotating keys
+
+### Ephemeral Key Storage Formats
+
+Three storage formats for managing contacts and their ephemeral keys:
+
+**1. Individual PEM files** (`.pub`, `.key`)
+- Standard PEM format with EPHEMERAL headers
+- One file per key, like long-term keys
+- Best for: simple CLI usage, single contact
+
+**2. Separate consolidated JSON** (`.eph.key`, `.eph.pub`)
+- JSON with contact → key mapping
+- Separate files for private and public keys
+- Best for: multiple contacts, security separation
+
+```json
+// .eph.key format
+{
+  "version": 1,
+  "contacts": {
+    "bob": { "key": "base64..." },
+    "alice": { "key": "base64..." }
+  }
+}
+```
+
+**3. Unified JSON** (`.eph`)
+- Single file with both keys per contact
+- `my_private`: your key for this contact
+- `their_public`: contact's current public key
+- Best for: chat applications, automated ratchet
+
+```json
+// .eph format
+{
+  "version": 1,
+  "contacts": {
+    "bob": {
+      "my_private": "base64...",
+      "their_public": "base64..."
+    }
+  }
+}
+```
+
 ### Key Derivation
 
 All key derivation uses HKDF-SHA256 with domain-specific salts:
@@ -139,13 +217,32 @@ const HKDF_SALT: &[u8] = b"KAMO-V3-SALT-2024";  // Legacy salt (DO NOT CHANGE)
 ### Key Format (PEM)
 
 ```
+# Static keys (long-term)
 -----BEGIN ANYHIDE PUBLIC KEY-----
 [base64 of 32 bytes X25519 public key]
 -----END ANYHIDE PUBLIC KEY-----
 
+-----BEGIN ANYHIDE PRIVATE KEY-----
+[base64 of 32 bytes X25519 secret key]
+-----END ANYHIDE PRIVATE KEY-----
+
+# Signing keys
+-----BEGIN ANYHIDE SIGNING PUBLIC KEY-----
+[base64 of 32 bytes Ed25519 public key]
+-----END ANYHIDE SIGNING PUBLIC KEY-----
+
 -----BEGIN ANYHIDE SIGNING KEY-----
 [base64 of 32 bytes Ed25519 secret key]
 -----END ANYHIDE SIGNING KEY-----
+
+# Ephemeral keys (for ratchet)
+-----BEGIN ANYHIDE EPHEMERAL PUBLIC KEY-----
+[base64 of 32 bytes X25519 public key]
+-----END ANYHIDE EPHEMERAL PUBLIC KEY-----
+
+-----BEGIN ANYHIDE EPHEMERAL PRIVATE KEY-----
+[base64 of 32 bytes X25519 secret key]
+-----END ANYHIDE EPHEMERAL PRIVATE KEY-----
 ```
 
 ## Encoding Pipeline

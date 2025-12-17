@@ -52,13 +52,15 @@ Anyhide uses a **pre-shared carrier** model:
 - **Any carrier**: text, images, audio, video, PDFs, executables, archives
 - **Any payload**: text messages, binary files, documents, archives
 - **Dual-layer encryption**: Symmetric (ChaCha20) + Asymmetric (X25519)
-- **Forward secrecy**: Past messages stay secure even if keys leak
+- **Forward secrecy ratchet**: Key rotation per message - past messages stay secure even if keys leak
+- **Ephemeral keys**: Generate rotating keys for perfect forward secrecy
 - **Message signing**: Ed25519 signatures for sender authentication
 - **Message expiration**: Auto-expiring messages
 - **Code splitting**: Split codes for multi-channel delivery
 - **QR code support**: Share codes via QR
 - **Plausible deniability**: Wrong passphrase returns garbage, not an error
 - **Never fails**: Decoder always returns something - prevents brute-force detection
+- **Library support**: Use Anyhide in your own Rust projects
 
 ## Installation
 
@@ -123,12 +125,31 @@ anyhide decode \
 ### Generate Keys
 
 ```bash
-anyhide keygen -o <name>
-# Creates 4 files:
-#   <name>.pub       - Encryption public key (share with senders)
-#   <name>.key       - Encryption private key (keep secret)
-#   <name>.sign.pub  - Signing public key (share with receivers)
-#   <name>.sign.key  - Signing private key (keep secret)
+anyhide keygen [OPTIONS] -o <name>
+
+Options:
+  -o, --output <PATH>      Output path for keys (default: anyhide)
+  --ephemeral              Generate ephemeral keys for forward secrecy
+  --contact <NAME>         Contact name (required for consolidated storage)
+  --eph-keys <PATH>        Path to .eph.key file (consolidated private keys)
+  --eph-pubs <PATH>        Path to .eph.pub file (consolidated public keys)
+  --eph-file <PATH>        Path to .eph file (unified storage)
+
+# Long-term keys (default)
+anyhide keygen -o mykeys
+# Creates: mykeys.pub, mykeys.key, mykeys.sign.pub, mykeys.sign.key
+
+# Ephemeral keys (individual files)
+anyhide keygen -o alice --ephemeral
+# Creates: alice.pub, alice.key (with EPHEMERAL PEM headers)
+
+# Ephemeral keys (consolidated separate files)
+anyhide keygen --ephemeral --eph-keys keys.eph.key --eph-pubs keys.eph.pub --contact bob
+# Adds/updates contact "bob" in both JSON files
+
+# Ephemeral keys (unified file)
+anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
+# Adds/updates contact "bob" with my_private and placeholder their_public
 ```
 
 ### Encode
@@ -143,6 +164,7 @@ Options:
   -p, --passphrase <PASS>  Passphrase for encryption
   -k, --key <PATH>         Recipient's public key
   --sign <PATH>            Sign with Ed25519 key
+  --ratchet                Enable forward secrecy (include next public key)
   --expires <TIME>         Expiration: "+30m", "+24h", "+7d", "2025-12-31"
   --split <N>              Split into N parts (2-10)
   --qr <PATH>              Generate QR code
@@ -247,6 +269,99 @@ anyhide encode -c carrier.txt -m "Secret" -p "pass" -k bob.pub --split 3 --qr co
 # Creates: code-1.png, code-2.png, code-3.png
 ```
 
+### Forward Secrecy Ratchet
+
+Enable key rotation per message for perfect forward secrecy.
+
+#### Ephemeral Key Storage Formats
+
+Anyhide supports 3 storage formats for ephemeral keys:
+
+**Option 1: Individual PEM files** (simple, single contact)
+```bash
+anyhide keygen -o alice --ephemeral
+# Creates: alice.pub, alice.key (with EPHEMERAL headers)
+```
+
+**Option 2: Separate consolidated JSON files** (multiple contacts)
+```bash
+anyhide keygen --ephemeral --eph-keys mykeys.eph.key --eph-pubs contacts.eph.pub --contact bob
+# mykeys.eph.key: JSON with your private keys for each contact
+# contacts.eph.pub: JSON with each contact's public key
+```
+
+**Option 3: Unified JSON file** (recommended for chat apps)
+```bash
+anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
+# contacts.eph: JSON with both my_private and their_public per contact
+```
+
+#### Basic Ratchet Example
+
+```bash
+# Step 1: Alice generates ephemeral keys
+anyhide keygen -o alice --ephemeral
+# Creates: alice.pub (share with Bob), alice.key (keep secret)
+
+# Step 2: Bob generates his ephemeral keys
+anyhide keygen -o bob --ephemeral
+# Creates: bob.pub (share with Alice), bob.key (keep secret)
+
+# Step 3: Alice sends message with --ratchet
+anyhide encode -c carrier.txt -m "Hello Bob" -p "pass" -k bob.pub --ratchet
+# Output: CODE + next_public_key (Alice's NEXT public key)
+
+# Step 4: Bob decodes and gets Alice's next key
+anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key -v
+# Output: Hello Bob
+# Forward Secrecy Ratchet:
+#   Sender included their NEXT public key for your reply.
+#   -----BEGIN ANYHIDE EPHEMERAL PUBLIC KEY-----
+#   [Alice's next public key - save this for your reply]
+#   -----END ANYHIDE EPHEMERAL PUBLIC KEY-----
+
+# Step 5: Bob saves Alice's new key and replies using it
+# (In a real app, this is automated)
+```
+
+#### Library Usage for Chat Applications
+
+```rust
+use anyhide::{encode_with_config, decode_with_config, EncoderConfig, DecoderConfig};
+use anyhide::{KeyPair, save_unified_keys_for_contact, update_unified_public_key};
+
+// Initial setup: generate keys for Bob
+let my_keypair = KeyPair::generate_ephemeral();
+save_unified_keys_for_contact(
+    "contacts.eph",
+    "bob",
+    my_keypair.secret_key(),
+    &bobs_initial_public_key,
+)?;
+
+// Encode with ratchet enabled
+let config = EncoderConfig { ratchet: true, ..Default::default() };
+let result = encode_with_config(&carrier, "Hello!", "pass", &bobs_public_key, &config)?;
+
+// result.next_keypair contains your NEXT key pair
+// Save it for the next message you send
+// result.code contains the encrypted message
+
+// On receiving a reply, decode and get their next key
+let decoded = decode_with_config(&code, &carrier, "pass", &my_secret_key, &DecoderConfig::default());
+if let Some(next_key_bytes) = decoded.next_public_key {
+    // Update Bob's public key for the next message
+    let next_public = PublicKey::from(<[u8; 32]>::try_from(next_key_bytes)?);
+    update_unified_public_key("contacts.eph", "bob", &next_public)?;
+}
+```
+
+**How the ratchet works:**
+1. Each message includes sender's NEXT public key
+2. Recipient uses that key for the reply
+3. Keys rotate with every message exchange
+4. Compromised keys cannot decrypt past messages
+
 ## Security Properties
 
 1. **Four-Factor Security**: Carrier + Passphrase + Private Key + Correct Version
@@ -278,4 +393,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.7.1 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.8.0 (see [CHANGELOG.md](CHANGELOG.md))
