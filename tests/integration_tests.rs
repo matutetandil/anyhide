@@ -10,7 +10,7 @@
 //! - Block padding (message length hidden)
 
 use anyhide::crypto::KeyPair;
-use anyhide::{decode, encode, encode_with_config};
+use anyhide::{decode, encode, encode_with_config, encode_with_carrier_config, Carrier};
 
 /// Test basic encode/decode roundtrip
 #[test]
@@ -389,7 +389,7 @@ fn test_roundtrip_v5() {
 // ============================================================================
 
 use anyhide::{
-    decode_bytes_with_carrier, encode_bytes_with_carrier, Carrier,
+    decode_bytes_with_carrier, encode_bytes_with_carrier,
 };
 
 /// Test binary message encode/decode roundtrip
@@ -622,4 +622,117 @@ fn test_decode_no_ratchet_no_next_public_key() {
 
     // Should NOT have next_public_key
     assert!(decoded.next_public_key.is_none());
+}
+
+/// Test automatic ratchet key rotation using unified store
+#[test]
+fn test_automatic_ratchet_with_unified_store() {
+    use anyhide::crypto::{
+        save_unified_keys_for_contact, load_unified_keys_for_contact,
+        update_unified_public_key, update_unified_private_key,
+    };
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let alice_store = dir.path().join("alice.eph");
+    let bob_store = dir.path().join("bob.eph");
+
+    // Carrier needs enough text to encode messages with substring matching
+    let carrier = "Hello Bob! How are you doing today? Alice was wondering if you want to go to the park. Hi there everyone!";
+    let passphrase = "secret";
+
+    // Step 1: Alice and Bob generate initial keys and exchange public keys
+    let alice_keypair = KeyPair::generate_ephemeral();
+    let bob_keypair = KeyPair::generate_ephemeral();
+
+    // Alice stores Bob's public key
+    save_unified_keys_for_contact(
+        &alice_store,
+        "bob",
+        alice_keypair.secret_key(),
+        bob_keypair.public_key(),
+    ).unwrap();
+
+    // Bob stores Alice's public key
+    save_unified_keys_for_contact(
+        &bob_store,
+        "alice",
+        bob_keypair.secret_key(),
+        alice_keypair.public_key(),
+    ).unwrap();
+
+    // Step 2: Alice encodes with ratchet
+    let alice_keys = load_unified_keys_for_contact(&alice_store, "bob").unwrap();
+    let bob_public = alice_keys.their_public;
+
+    let config = anyhide::EncoderConfig {
+        ratchet: true,
+        ..Default::default()
+    };
+    let carrier_obj = Carrier::from_text(carrier);
+    let encoded = encode_with_carrier_config(
+        &carrier_obj,
+        "Hello Bob",
+        passphrase,
+        &bob_public,
+        &config,
+    ).unwrap();
+
+    // Alice should have next_keypair to save
+    assert!(encoded.next_keypair.is_some());
+    let alice_next = encoded.next_keypair.as_ref().unwrap();
+
+    // Alice saves her new private key
+    update_unified_private_key(&alice_store, "bob", alice_next.secret_key()).unwrap();
+
+    // Step 3: Bob decodes and gets Alice's next public key
+    let bob_keys = load_unified_keys_for_contact(&bob_store, "alice").unwrap();
+    let decoded = decode(&encoded.code, carrier, passphrase, &bob_keys.my_private);
+
+    assert!(decoded.message.to_lowercase().contains("hello"));
+    assert!(decoded.next_public_key.is_some());
+
+    // Bob saves Alice's next public key
+    let alice_next_public_bytes = decoded.next_public_key.unwrap();
+    assert_eq!(alice_next_public_bytes.len(), 32);
+
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&alice_next_public_bytes);
+    let alice_next_public = x25519_dalek::PublicKey::from(key_array);
+
+    update_unified_public_key(&bob_store, "alice", &alice_next_public).unwrap();
+
+    // Verify Alice's next public matches what was saved
+    let bob_keys_updated = load_unified_keys_for_contact(&bob_store, "alice").unwrap();
+    assert_eq!(
+        bob_keys_updated.their_public.as_bytes(),
+        alice_next.public_key().as_bytes()
+    );
+
+    // Step 4: Bob can now reply using Alice's new key
+    let config2 = anyhide::EncoderConfig {
+        ratchet: true,
+        ..Default::default()
+    };
+    let bob_reply = encode_with_carrier_config(
+        &carrier_obj,
+        "Hi Alice!",
+        passphrase,
+        &bob_keys_updated.their_public,
+        &config2,
+    ).unwrap();
+
+    // Bob saves his new private key
+    assert!(bob_reply.next_keypair.is_some());
+    let bob_next = bob_reply.next_keypair.as_ref().unwrap();
+    update_unified_private_key(&bob_store, "alice", bob_next.secret_key()).unwrap();
+
+    // Step 5: Alice decodes Bob's reply using her NEW key
+    let alice_keys_updated = load_unified_keys_for_contact(&alice_store, "bob").unwrap();
+    let decoded_reply = decode(&bob_reply.code, carrier, passphrase, &alice_keys_updated.my_private);
+
+    assert!(decoded_reply.message.to_lowercase().contains("hi"));
+
+    // Alice got Bob's next public key
+    assert!(decoded_reply.next_public_key.is_some());
 }

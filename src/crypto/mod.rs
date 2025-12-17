@@ -36,6 +36,7 @@ pub use keys::{
     encode_secret_key_pem, encode_secret_key_pem_with_type,
     load_public_key, load_public_key_with_type,
     load_secret_key, load_secret_key_with_type,
+    save_ephemeral_private_key_pem, save_ephemeral_public_key_pem,
     KeyError, KeyPair, KeyType,
 };
 pub use multi_recipient::{decrypt_multi, encrypt_multi, MultiRecipientData, MultiRecipientError};

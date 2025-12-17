@@ -89,6 +89,7 @@ pub use crypto::{
     encode_ephemeral_public_key_pem, encode_ephemeral_secret_key_pem,
     decode_public_key_pem_with_type, decode_secret_key_pem_with_type,
     load_public_key_with_type, load_secret_key_with_type,
+    save_ephemeral_public_key_pem, save_ephemeral_private_key_pem,
     detect_key_type,
 };
 

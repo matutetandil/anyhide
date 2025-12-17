@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2025-12-17
+
+### Added
+
+- **Automatic Ratchet Key Management**
+  - Keys now rotate automatically without manual intervention
+  - `--my-key` flag for encode (auto-saves next private key after encoding)
+  - `--their-key` flag for decode (auto-saves sender's next public key)
+  - `--eph-file` + `--contact` for consolidated key stores
+
+- **New CLI Parameters**
+  - `--their-key <PATH>`: Specify recipient's public key (encode) or sender's public key (decode)
+  - `--my-key <PATH>`: Specify your private key file for automatic ratchet updates
+  - `--eph-file <PATH>`: Unified ephemeral key store file (.eph)
+  - `--eph-keys <PATH>`: Separated ephemeral private keys file (.eph.key)
+  - `--eph-pubs <PATH>`: Separated ephemeral public keys file (.eph.pub)
+  - `--contact <NAME>`: Contact name when using ephemeral stores
+
+- **Clean Message Output**
+  - Decoded messages now show only the message content by default
+  - Key rotation information only shown with `-v` (verbose) flag
+  - Cleaner user experience for end users
+
+### Deprecated
+
+- `--key` flag (both encode and decode)
+  - Use `--their-key` for encode (recipient's public key)
+  - Use `--my-key` for decode (your private key)
+  - Shows warning when used, still works for backwards compatibility
+
+### Changed
+
+- Forward secrecy ratchet is now fully automatic when using ephemeral stores
+- Encode: After encoding with `--ratchet`, next keypair is saved automatically
+- Decode: After decoding, sender's next public key is saved automatically
+- Key rotation requires no manual copying/pasting of keys
+
+### Examples
+
+```bash
+# Automatic ratchet with individual files
+anyhide encode -c carrier.txt -m "Hello" -p "pass" \
+    --their-key bob.pub --my-key alice.key --ratchet
+# alice.key is automatically updated with next keypair
+
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --my-key bob.key --their-key alice.pub
+# alice.pub is automatically updated with sender's next key
+
+# Automatic ratchet with unified store (recommended)
+anyhide encode -c carrier.txt -m "Hello" -p "pass" \
+    --eph-file contacts.eph --contact bob --ratchet
+
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --eph-file contacts.eph --contact alice
+
+# Automatic ratchet with separated stores
+anyhide encode -c carrier.txt -m "Hello" -p "pass" \
+    --eph-keys mykeys.eph.key --eph-pubs contacts.eph.pub --contact bob --ratchet
+
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --eph-keys mykeys.eph.key --eph-pubs contacts.eph.pub --contact alice
+```
+
 ## [0.8.0] - 2025-12-17
 
 ### Added

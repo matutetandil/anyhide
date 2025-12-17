@@ -6,7 +6,12 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::Args;
 
-use anyhide::crypto::{load_secret_key, load_verifying_key, KeyPair};
+use anyhide::crypto::{
+    load_secret_key, load_verifying_key, KeyPair,
+    load_unified_keys_for_contact, update_unified_public_key,
+    load_private_key_for_contact, save_public_key_for_contact,
+    save_ephemeral_public_key_pem,
+};
 use anyhide::qr::read_qr_from_file;
 use anyhide::{decode_with_carrier_config, decode_bytes_with_carrier_config, Carrier, DecoderConfig};
 
@@ -52,9 +57,37 @@ pub struct DecodeCommand {
     #[arg(short, long)]
     pub passphrase: String,
 
-    /// Path to your private key
+    /// [DEPRECATED: use --my-key] Path to your private key
     #[arg(short, long)]
-    pub key: PathBuf,
+    pub key: Option<PathBuf>,
+
+    /// Path to your private key file (your .key or ephemeral .key file)
+    #[arg(long)]
+    pub my_key: Option<PathBuf>,
+
+    /// Path to sender's public key file (for auto-saving their next_public_key)
+    /// Required with --ratchet for automatic key rotation
+    #[arg(long)]
+    pub their_key: Option<PathBuf>,
+
+    /// Ephemeral key store file (.eph unified format)
+    /// Use with --contact for automatic key management
+    #[arg(long, conflicts_with_all = ["eph_keys", "eph_pubs"])]
+    pub eph_file: Option<PathBuf>,
+
+    /// Ephemeral private keys file (.eph.key, separated format)
+    /// Use with --eph-pubs and --contact
+    #[arg(long, requires = "eph_pubs")]
+    pub eph_keys: Option<PathBuf>,
+
+    /// Ephemeral public keys file (.eph.pub, separated format)
+    /// Use with --eph-keys and --contact
+    #[arg(long, requires = "eph_keys")]
+    pub eph_pubs: Option<PathBuf>,
+
+    /// Contact name in the ephemeral key store (required with --eph-file or --eph-keys/--eph-pubs)
+    #[arg(long)]
+    pub contact: Option<String>,
 
     /// Output file for decoded data (required for binary data)
     /// If not specified, prints decoded text to stdout
@@ -134,13 +167,8 @@ impl DecodeCommand {
             eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
         }
 
-        let secret_key = match load_secret_key(&self.key) {
-            Ok(k) => k,
-            Err(e) => {
-                eprintln!("Warning: Could not load private key: {}", e);
-                KeyPair::generate().into_secret_key()
-            }
-        };
+        // Resolve private key from various sources
+        let (secret_key, eph_store_info) = self.resolve_my_private_key();
 
         // Load verifying key if provided
         let verifying_key = self.verify.as_ref().and_then(|path| {
@@ -177,9 +205,14 @@ impl DecodeCommand {
             }
 
             show_signature_status(decoded.signature_valid, self.verbose);
-            show_next_public_key(&decoded.next_public_key, self.verbose);
+
+            // Auto-save next_public_key if present
+            if let Some(ref next_key) = decoded.next_public_key {
+                self.save_their_next_public_key(next_key, &eph_store_info);
+            }
 
             if self.verbose {
+                show_next_public_key(&decoded.next_public_key);
                 eprintln!();
                 eprintln!("Byte fragments: {} fragments", decoded.fragments.len());
             }
@@ -190,14 +223,197 @@ impl DecodeCommand {
             println!("{}", decoded.message);
 
             show_signature_status(decoded.signature_valid, self.verbose);
-            show_next_public_key(&decoded.next_public_key, self.verbose);
+
+            // Auto-save next_public_key if present
+            if let Some(ref next_key) = decoded.next_public_key {
+                self.save_their_next_public_key(next_key, &eph_store_info);
+            }
 
             if self.verbose {
+                show_next_public_key(&decoded.next_public_key);
                 eprintln!();
                 eprintln!("Fragments: {:?}", decoded.fragments);
             }
         }
     }
+
+    /// Resolves my private key from various sources.
+    /// Returns (secret_key, optional_eph_store_info)
+    fn resolve_my_private_key(&self) -> (x25519_dalek::StaticSecret, Option<EphStoreInfo>) {
+        // Priority 1: Unified ephemeral store (.eph)
+        if let Some(eph_path) = &self.eph_file {
+            let contact = match &self.contact {
+                Some(c) => c,
+                None => {
+                    eprintln!("Warning: --contact is required when using --eph-file");
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            };
+
+            match load_unified_keys_for_contact(eph_path, contact) {
+                Ok(keys) => {
+                    if self.verbose {
+                        eprintln!("Loaded private key for contact '{}' from {}", contact, eph_path.display());
+                    }
+                    let store_info = EphStoreInfo {
+                        pub_store: eph_path.clone(),
+                        key_store: None,
+                        contact: contact.clone(),
+                        is_unified: true,
+                    };
+                    return (keys.my_private, Some(store_info));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load keys for contact '{}': {}", contact, e);
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            }
+        }
+
+        // Priority 2: Separated ephemeral stores (.eph.key + .eph.pub)
+        if let (Some(eph_keys), Some(eph_pubs)) = (&self.eph_keys, &self.eph_pubs) {
+            let contact = match &self.contact {
+                Some(c) => c,
+                None => {
+                    eprintln!("Warning: --contact is required when using --eph-keys/--eph-pubs");
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            };
+
+            match load_private_key_for_contact(eph_keys, contact) {
+                Ok(key) => {
+                    if self.verbose {
+                        eprintln!("Loaded private key for contact '{}' from {}", contact, eph_keys.display());
+                    }
+                    let store_info = EphStoreInfo {
+                        pub_store: eph_pubs.clone(),
+                        key_store: Some(eph_keys.clone()),
+                        contact: contact.clone(),
+                        is_unified: false,
+                    };
+                    return (key, Some(store_info));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load private key for contact '{}': {}", contact, e);
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            }
+        }
+
+        // Priority 3: --my-key (new parameter)
+        if let Some(my_key_path) = &self.my_key {
+            match load_secret_key(my_key_path) {
+                Ok(key) => {
+                    if self.verbose {
+                        eprintln!("Loaded private key from {}", my_key_path.display());
+                    }
+                    return (key, None);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load private key from {}: {}", my_key_path.display(), e);
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            }
+        }
+
+        // Priority 4: --key (deprecated)
+        if let Some(key_path) = &self.key {
+            eprintln!("WARNING: --key is deprecated. Use --my-key instead.");
+
+            match load_secret_key(key_path) {
+                Ok(key) => {
+                    return (key, None);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load private key from {}: {}", key_path.display(), e);
+                    return (KeyPair::generate().into_secret_key(), None);
+                }
+            }
+        }
+
+        // No key provided - for plausible deniability, generate a random key
+        eprintln!("Warning: No private key specified. Use --my-key, --eph-file, or --eph-keys/--eph-pubs");
+        (KeyPair::generate().into_secret_key(), None)
+    }
+
+    /// Saves the sender's next public key for forward secrecy ratchet.
+    fn save_their_next_public_key(
+        &self,
+        next_key_bytes: &[u8],
+        store_info: &Option<EphStoreInfo>,
+    ) {
+        // Convert bytes to PublicKey
+        if next_key_bytes.len() != 32 {
+            if self.verbose {
+                eprintln!("Warning: Invalid next_public_key length: {} bytes", next_key_bytes.len());
+            }
+            return;
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(next_key_bytes);
+        let public_key = x25519_dalek::PublicKey::from(key_array);
+
+        // Option 1: Ephemeral store (unified or separated)
+        if let Some(info) = store_info {
+            let result = if info.is_unified {
+                // Unified format: update public key in .eph file
+                update_unified_public_key(&info.pub_store, &info.contact, &public_key)
+            } else {
+                // Separated format: save to .eph.pub file
+                save_public_key_for_contact(&info.pub_store, &info.contact, &public_key)
+            };
+
+            match result {
+                Ok(_) => {
+                    if self.verbose {
+                        eprintln!("Saved sender's next public key for contact '{}' to {}", info.contact, info.pub_store.display());
+                    }
+                }
+                Err(e) => {
+                    if self.verbose {
+                        eprintln!("Warning: Could not save next public key: {}", e);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Option 2: Loose ephemeral file (--their-key)
+        if let Some(their_key_path) = &self.their_key {
+            match save_ephemeral_public_key_pem(&public_key, their_key_path) {
+                Ok(_) => {
+                    if self.verbose {
+                        eprintln!("Saved sender's next public key to {}", their_key_path.display());
+                    }
+                }
+                Err(e) => {
+                    if self.verbose {
+                        eprintln!("Warning: Could not save next public key: {}", e);
+                    }
+                }
+            }
+            return;
+        }
+
+        // No destination for saving - just log if verbose
+        if self.verbose {
+            eprintln!("Note: Sender included next_public_key but no --their-key or --eph-file specified");
+        }
+    }
+}
+
+/// Ephemeral store info for tracking which files to use
+struct EphStoreInfo {
+    /// For unified format: the .eph file. For separated: the .eph.pub file
+    pub_store: PathBuf,
+    /// For separated format only: the .eph.key file
+    #[allow(dead_code)]
+    key_store: Option<PathBuf>,
+    /// Contact name
+    contact: String,
+    /// Is this unified format?
+    is_unified: bool,
 }
 
 /// Shows the signature verification status to the user.
@@ -218,12 +434,11 @@ fn show_signature_status(signature_valid: Option<bool>, verbose: bool) {
     }
 }
 
-/// Shows the next public key for forward secrecy ratchet.
-fn show_next_public_key(next_public_key: &Option<Vec<u8>>, verbose: bool) {
+/// Shows the next public key for forward secrecy ratchet (verbose mode only).
+fn show_next_public_key(next_public_key: &Option<Vec<u8>>) {
     if let Some(key_bytes) = next_public_key {
         eprintln!();
-        eprintln!("Forward Secrecy Ratchet:");
-        eprintln!("  Sender included their NEXT public key for your reply.");
+        eprintln!("Forward Secrecy Ratchet: Sender included their next public key");
 
         // Convert bytes to X25519 PublicKey and encode as PEM
         if key_bytes.len() == 32 {
@@ -233,13 +448,11 @@ fn show_next_public_key(next_public_key: &Option<Vec<u8>>, verbose: bool) {
 
             use anyhide::crypto::encode_ephemeral_public_key_pem;
             let pem = encode_ephemeral_public_key_pem(&public_key);
-            eprintln!("  Use this key when replying to maintain forward secrecy:");
             eprintln!("{}", pem);
-            eprintln!("  Save this key and use it with --key when encoding your reply.");
         } else {
             eprintln!("  (Invalid key length: {} bytes)", key_bytes.len());
         }
-    } else if verbose {
+    } else {
         eprintln!("Forward Secrecy: None (sender did not include next public key)");
     }
 }

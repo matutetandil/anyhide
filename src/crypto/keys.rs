@@ -219,6 +219,30 @@ pub fn encode_ephemeral_secret_key_pem(key: &StaticSecret) -> String {
     encode_secret_key_pem_with_type(key, KeyType::Ephemeral)
 }
 
+/// Saves an ephemeral private key to a PEM file.
+pub fn save_ephemeral_private_key_pem(key: &StaticSecret, path: &Path) -> Result<(), KeyError> {
+    let pem = encode_ephemeral_secret_key_pem(key);
+    fs::write(path, pem)?;
+
+    // Set restrictive permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+
+    Ok(())
+}
+
+/// Saves an ephemeral public key to a PEM file.
+pub fn save_ephemeral_public_key_pem(key: &PublicKey, path: &Path) -> Result<(), KeyError> {
+    let pem = encode_ephemeral_public_key_pem(key);
+    fs::write(path, pem)?;
+    Ok(())
+}
+
 /// Loads a public key from a PEM file.
 pub fn load_public_key(path: &Path) -> Result<PublicKey, KeyError> {
     let (key, _key_type) = load_public_key_with_type(path)?;

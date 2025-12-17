@@ -105,7 +105,7 @@ anyhide encode \
   -c carrier.txt \
   -m "ama park" \
   -p "secret123" \
-  -k recipient.pub
+  --their-key recipient.pub
 # Output: AwNhYmNkZWZn... (send this code)
 ```
 
@@ -116,7 +116,7 @@ anyhide decode \
   --code "AwNhYmNkZWZn..." \
   -c carrier.txt \
   -p "secret123" \
-  -k recipient.key
+  --my-key recipient.key
 # Output: ama park
 ```
 
@@ -155,16 +155,28 @@ anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
 ### Encode
 
 ```bash
-anyhide encode [OPTIONS] -c <CARRIER> -p <PASSPHRASE> -k <PUBKEY>
+anyhide encode [OPTIONS] -c <CARRIER> -p <PASSPHRASE>
 
 Options:
   -c, --carrier <PATH>     Carrier file (any file type)
   -m, --message <TEXT>     Text message (or use --file for binary)
   -f, --file <PATH>        Binary file to hide
   -p, --passphrase <PASS>  Passphrase for encryption
-  -k, --key <PATH>         Recipient's public key
+
+Key options (choose one):
+  --their-key <PATH>       Recipient's public key (.pub file)
+  --eph-file <PATH>        Unified ephemeral key store (.eph)
+  --eph-keys <PATH>        Separated ephemeral private keys (.eph.key)
+  --eph-pubs <PATH>        Separated ephemeral public keys (.eph.pub)
+  --contact <NAME>         Contact name (required with --eph-file or --eph-keys/--eph-pubs)
+  -k, --key <PATH>         [DEPRECATED] Use --their-key instead
+
+Ratchet options:
+  --ratchet                Enable forward secrecy (auto key rotation)
+  --my-key <PATH>          Your private key (for auto-saving next keypair)
+
+Other options:
   --sign <PATH>            Sign with Ed25519 key
-  --ratchet                Enable forward secrecy (include next public key)
   --expires <TIME>         Expiration: "+30m", "+24h", "+7d", "2025-12-31"
   --split <N>              Split into N parts (2-10)
   --qr <PATH>              Generate QR code
@@ -176,7 +188,7 @@ Options:
 ### Decode
 
 ```bash
-anyhide decode [OPTIONS] -c <CARRIER> -p <PASSPHRASE> -k <PRIVKEY>
+anyhide decode [OPTIONS] -c <CARRIER> -p <PASSPHRASE>
 
 Code input (choose one):
   --code <TEXT>            Direct base64 code
@@ -187,7 +199,19 @@ Code input (choose one):
 Options:
   -c, --carrier <PATH>     Carrier file (same as encoding)
   -p, --passphrase <PASS>  Passphrase for decryption
-  -k, --key <PATH>         Your private key
+
+Key options (choose one):
+  --my-key <PATH>          Your private key (.key file)
+  --eph-file <PATH>        Unified ephemeral key store (.eph)
+  --eph-keys <PATH>        Separated ephemeral private keys (.eph.key)
+  --eph-pubs <PATH>        Separated ephemeral public keys (.eph.pub)
+  --contact <NAME>         Contact name (required with --eph-file or --eph-keys/--eph-pubs)
+  -k, --key <PATH>         [DEPRECATED] Use --my-key instead
+
+Ratchet options:
+  --their-key <PATH>       Sender's public key (for auto-saving their next key)
+
+Other options:
   --verify <PATH>          Verify signature with sender's public key
   -o, --output <PATH>      Output file (required for binary)
   -v, --verbose            Show details
@@ -296,33 +320,79 @@ anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
 # contacts.eph: JSON with both my_private and their_public per contact
 ```
 
-#### Basic Ratchet Example
+#### Automatic Ratchet with Individual Files
 
 ```bash
-# Step 1: Alice generates ephemeral keys
-anyhide keygen -o alice --ephemeral
-# Creates: alice.pub (share with Bob), alice.key (keep secret)
+# Step 1: Both parties generate ephemeral keys and exchange public keys
+anyhide keygen -o alice --ephemeral   # Alice: alice.pub, alice.key
+anyhide keygen -o bob --ephemeral     # Bob: bob.pub, bob.key
 
-# Step 2: Bob generates his ephemeral keys
-anyhide keygen -o bob --ephemeral
-# Creates: bob.pub (share with Alice), bob.key (keep secret)
+# Step 2: Alice sends message (keys rotate automatically)
+anyhide encode -c carrier.txt -m "Hello Bob" -p "pass" \
+    --their-key bob.pub --my-key alice.key --ratchet
+# Output: Just the code (alice.key updated with next keypair)
 
-# Step 3: Alice sends message with --ratchet
-anyhide encode -c carrier.txt -m "Hello Bob" -p "pass" -k bob.pub --ratchet
-# Output: CODE + next_public_key (Alice's NEXT public key)
+# Step 3: Bob decodes (their public key updated automatically)
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --my-key bob.key --their-key alice.pub
+# Output: Hello Bob (alice.pub updated with her next public key)
 
-# Step 4: Bob decodes and gets Alice's next key
-anyhide decode --code "..." -c carrier.txt -p "pass" -k bob.key -v
-# Output: Hello Bob
-# Forward Secrecy Ratchet:
-#   Sender included their NEXT public key for your reply.
-#   -----BEGIN ANYHIDE EPHEMERAL PUBLIC KEY-----
-#   [Alice's next public key - save this for your reply]
-#   -----END ANYHIDE EPHEMERAL PUBLIC KEY-----
-
-# Step 5: Bob saves Alice's new key and replies using it
-# (In a real app, this is automated)
+# Step 4: Bob replies (keys rotate again)
+anyhide encode -c carrier.txt -m "Hi Alice!" -p "pass" \
+    --their-key alice.pub --my-key bob.key --ratchet
+# Output: Just the code (bob.key updated)
 ```
+
+#### Automatic Ratchet with Separated Stores
+
+For environments where you want private keys and public keys in separate files:
+
+```bash
+# Step 1: Setup - create separated key stores
+anyhide keygen --ephemeral --eph-keys alice.eph.key --eph-pubs alice.eph.pub --contact bob
+anyhide keygen --ephemeral --eph-keys bob.eph.key --eph-pubs bob.eph.pub --contact alice
+# Exchange initial public keys
+
+# Step 2: Alice sends message
+anyhide encode -c carrier.txt -m "Hello Bob" -p "pass" \
+    --eph-keys alice.eph.key --eph-pubs alice.eph.pub --contact bob --ratchet
+# Output: Just the code (alice.eph.key[bob] updated with next keypair)
+
+# Step 3: Bob decodes
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --eph-keys bob.eph.key --eph-pubs bob.eph.pub --contact alice
+# Output: Hello Bob (bob.eph.pub[alice] updated with Alice's next public key)
+```
+
+#### Automatic Ratchet with Unified Store (Recommended)
+
+```bash
+# Step 1: Setup - create unified key stores for each party
+anyhide keygen --ephemeral --eph-file alice.eph --contact bob
+anyhide keygen --ephemeral --eph-file bob.eph --contact alice
+# Exchange public keys initially
+
+# Step 2: Alice sends message
+anyhide encode -c carrier.txt -m "Hello Bob" -p "pass" \
+    --eph-file alice.eph --contact bob --ratchet
+# Output: Just the code (alice.eph[bob].my_private updated)
+
+# Step 3: Bob decodes
+anyhide decode --code "..." -c carrier.txt -p "pass" \
+    --eph-file bob.eph --contact alice
+# Output: Hello Bob (bob.eph[alice].their_public updated)
+
+# Step 4: Bob replies
+anyhide encode -c carrier.txt -m "Hi Alice!" -p "pass" \
+    --eph-file bob.eph --contact alice --ratchet
+# Output: Just the code (bob.eph[alice].my_private updated)
+```
+
+**Key points:**
+- Messages are always clean - no key information displayed
+- Keys rotate automatically after each encode/decode
+- Use `-v` for verbose output if you need to see key details
+- The `--key` flag is deprecated - use `--my-key` and `--their-key` instead
 
 #### Library Usage for Chat Applications
 
@@ -393,4 +463,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.8.0 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.8.1 (see [CHANGELOG.md](CHANGELOG.md))
