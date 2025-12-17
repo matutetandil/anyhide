@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2025-12-17
+
+### Added
+
+- **Key Fingerprints** - Out-of-band key verification
+  - `anyhide fingerprint <key-file>` command to display key fingerprints
+  - Three output formats: `--format hex` (default), `--format emoji`, `--format art`
+  - Hex format: SHA-256 hash in hexadecimal (64 characters)
+  - Emoji format: Hash as emoji sequence (16 emojis) - easy to compare verbally
+  - Art format: SSH-style randomart visual representation
+  - Works with all key types: public (.pub), private (.key), signing (.sign.pub, .sign.key)
+
+- **Duress Password (Plausible Deniability)**
+  - Encode two messages with different passphrases in the same code
+  - `--decoy <MESSAGE>` flag for the innocent decoy message
+  - `--decoy-pass <PASS>` flag for the decoy passphrase
+  - Real passphrase reveals real message, decoy passphrase reveals decoy
+  - If coerced, give the decoy passphrase to reveal innocent content
+  - Wrong passphrase (neither real nor decoy) returns garbage as usual
+
+### Library
+
+- Export `DecoyConfig` struct for library users
+- New `fingerprint` command module
+
+### Examples
+
+```bash
+# Key fingerprint verification
+anyhide fingerprint alice.pub
+# Output: a1b2c3d4...
+
+anyhide fingerprint alice.pub --format emoji
+# Output: 🔐🌟🎯🚀...
+
+anyhide fingerprint alice.pub --format art
+# Output: SSH-style randomart
+
+# Duress password encoding
+anyhide encode -c carrier.txt -m "Secret meeting at 3pm" -p "realpass" \
+    --their-key bob.pub \
+    --decoy "Happy birthday party!" --decoy-pass "innocent"
+
+# Decode with real passphrase → "Secret meeting at 3pm"
+# Decode with decoy passphrase → "Happy birthday party!"
+# Decode with wrong passphrase → garbage
+```
+
 ## [0.8.1] - 2025-12-17
 
 ### Added
