@@ -64,6 +64,18 @@ impl SigningKeyPair {
         }
     }
 
+    /// Creates a signing key pair from raw secret bytes (for mnemonic import).
+    ///
+    /// The verifying (public) key is derived from the signing (private) key.
+    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Result<Self, SigningError> {
+        let signing_key = SigningKey::from_bytes(bytes);
+        let verifying_key = signing_key.verifying_key();
+        Ok(Self {
+            signing_key,
+            verifying_key,
+        })
+    }
+
     /// Returns the verifying (public) key.
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.verifying_key

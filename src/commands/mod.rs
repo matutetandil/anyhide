@@ -3,9 +3,12 @@
 //! Each command is a separate module implementing the `CommandExecutor` trait.
 //! This provides clean separation of concerns and makes adding new commands easy.
 
+mod contacts;
 mod decode;
 mod encode;
+mod export_mnemonic;
 mod fingerprint;
+mod import_mnemonic;
 mod keygen;
 mod multi_decrypt;
 mod multi_encrypt;
@@ -14,9 +17,12 @@ mod qr_info;
 mod qr_read;
 mod update;
 
+pub use contacts::ContactsCommand;
 pub use decode::DecodeCommand;
 pub use encode::EncodeCommand;
+pub use export_mnemonic::ExportMnemonicCommand;
 pub use fingerprint::FingerprintCommand;
+pub use import_mnemonic::ImportMnemonicCommand;
 pub use keygen::KeygenCommand;
 pub use multi_decrypt::MultiDecryptCommand;
 pub use multi_encrypt::MultiEncryptCommand;

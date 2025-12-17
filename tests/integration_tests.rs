@@ -857,3 +857,143 @@ fn test_duress_password_signs_both_messages() {
     assert!(decoded_decoy.message.to_lowercase().contains("birthday"));
     assert_eq!(decoded_decoy.signature_valid, Some(true), "Decoy message MUST also have valid signature for security");
 }
+
+// ============================================================================
+// Mnemonic Backup Tests (v0.10.0)
+// ============================================================================
+
+/// Test mnemonic roundtrip for encryption keys
+#[test]
+fn test_mnemonic_encryption_key_roundtrip() {
+    use anyhide::crypto::{key_to_mnemonic, mnemonic_to_key};
+
+    // Generate a keypair
+    let original_keypair = KeyPair::generate();
+    let original_bytes: [u8; 32] = *original_keypair.secret_key().as_bytes();
+
+    // Convert to mnemonic
+    let words = key_to_mnemonic(&original_bytes);
+    assert_eq!(words.len(), 24, "Mnemonic should be 24 words");
+
+    // Convert back to key bytes
+    let recovered_bytes = mnemonic_to_key(&words).expect("Mnemonic should be valid");
+
+    // Should match
+    assert_eq!(original_bytes, recovered_bytes, "Recovered key should match original");
+
+    // Create keypair from recovered bytes and verify public key matches
+    let recovered_keypair = KeyPair::from_secret_bytes(&recovered_bytes);
+    assert_eq!(
+        original_keypair.public_key().as_bytes(),
+        recovered_keypair.public_key().as_bytes(),
+        "Recovered public key should match original"
+    );
+}
+
+/// Test mnemonic roundtrip for signing keys
+#[test]
+fn test_mnemonic_signing_key_roundtrip() {
+    use anyhide::crypto::{key_to_mnemonic, mnemonic_to_key, SigningKeyPair};
+
+    // Generate a signing keypair
+    let original_keypair = SigningKeyPair::generate();
+    let original_bytes: [u8; 32] = original_keypair.signing_key().to_bytes();
+
+    // Convert to mnemonic
+    let words = key_to_mnemonic(&original_bytes);
+    assert_eq!(words.len(), 24, "Mnemonic should be 24 words");
+
+    // Convert back to key bytes
+    let recovered_bytes = mnemonic_to_key(&words).expect("Mnemonic should be valid");
+
+    // Should match
+    assert_eq!(original_bytes, recovered_bytes, "Recovered key should match original");
+
+    // Create keypair from recovered bytes and verify verifying key matches
+    let recovered_keypair = SigningKeyPair::from_secret_bytes(&recovered_bytes)
+        .expect("Should create signing keypair from bytes");
+    assert_eq!(
+        original_keypair.verifying_key().to_bytes(),
+        recovered_keypair.verifying_key().to_bytes(),
+        "Recovered verifying key should match original"
+    );
+}
+
+/// Test mnemonic checksum validation
+#[test]
+fn test_mnemonic_invalid_checksum() {
+    use anyhide::crypto::{key_to_mnemonic, mnemonic_to_key, MnemonicError};
+
+    // Generate valid mnemonic
+    let key = [42u8; 32];
+    let mut words = key_to_mnemonic(&key);
+
+    // Corrupt one word
+    words[23] = if words[23] == "abandon" {
+        "ability".to_string()
+    } else {
+        "abandon".to_string()
+    };
+
+    // Should fail checksum validation
+    let result = mnemonic_to_key(&words);
+    assert!(matches!(result, Err(MnemonicError::InvalidChecksum)));
+}
+
+/// Test mnemonic with invalid word
+#[test]
+fn test_mnemonic_invalid_word() {
+    use anyhide::crypto::{mnemonic_to_key, MnemonicError};
+
+    let mut words: Vec<String> = vec!["abandon".to_string(); 24];
+    words[0] = "notavalidword".to_string();
+
+    let result = mnemonic_to_key(&words);
+    assert!(matches!(result, Err(MnemonicError::InvalidWord(_))));
+}
+
+// ============================================================================
+// Contacts Tests (v0.10.0)
+// ============================================================================
+
+/// Test contacts config CRUD
+#[test]
+fn test_contacts_config_crud_integration() {
+    use anyhide::contacts::{Contact, ContactsConfig};
+    use std::path::PathBuf;
+
+    let mut config = ContactsConfig::default();
+
+    // Add contacts
+    let alice = Contact::new(PathBuf::from("/path/to/alice.pub"));
+    config.add("alice", alice).unwrap();
+
+    let bob = Contact::with_signing(
+        PathBuf::from("/path/to/bob.pub"),
+        PathBuf::from("/path/to/bob.sign.pub"),
+    );
+    config.add("bob", bob).unwrap();
+
+    // Verify
+    assert_eq!(config.len(), 2);
+    assert!(config.contains("alice"));
+    assert!(config.contains("bob"));
+
+    // Get contact
+    let alice_contact = config.get("alice").unwrap();
+    assert_eq!(alice_contact.public_key, PathBuf::from("/path/to/alice.pub"));
+    assert!(alice_contact.signing_key.is_none());
+
+    let bob_contact = config.get("bob").unwrap();
+    assert!(bob_contact.signing_key.is_some());
+
+    // List is sorted
+    let list = config.list();
+    assert_eq!(list[0].0, "alice");
+    assert_eq!(list[1].0, "bob");
+
+    // Remove contact
+    config.remove("alice").unwrap();
+    assert_eq!(config.len(), 1);
+    assert!(!config.contains("alice"));
+}

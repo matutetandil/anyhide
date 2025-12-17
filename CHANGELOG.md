@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2025-12-17
+
+### Added
+
+- **Mnemonic Backup (BIP39-style)**
+  - Export private keys as 24-word mnemonic phrases for paper backup
+  - `--show-mnemonic` flag in keygen to display backup phrases after key generation
+  - `anyhide export-mnemonic <key-file>` to export existing keys
+  - `anyhide import-mnemonic -o <output>` to restore keys from mnemonic (interactive)
+  - `--key-type encryption|signing` to specify which key type to import
+  - BIP39 English wordlist (2048 words)
+  - Checksum validation to detect typos
+  - Only for long-term keys (.key, .sign.key) - ephemeral keys are not supported
+
+- **Contacts with Aliases**
+  - Store contact public keys with aliases in `~/.anyhide/contacts.toml`
+  - `anyhide contacts list` - show all contacts
+  - `anyhide contacts add <name> <key-path>` - add a contact
+  - `anyhide contacts add <name> <key-path> --signing <sign-pub>` - with signing key
+  - `anyhide contacts remove <name>` - remove a contact
+  - `anyhide contacts show <name>` - show contact details with fingerprint (emoji)
+  - `--to <alias>` flag in encode to use contact's key instead of `--their-key`
+
+### Library
+
+- Export `key_to_mnemonic`, `mnemonic_to_key`, `validate_mnemonic`, `format_mnemonic`, `MnemonicError`
+- Export `Contact`, `ContactsConfig`, `ContactsError`, `get_config_dir`, `resolve_contact_key`
+- `KeyPair::from_secret_bytes()` to create keypair from raw bytes
+- `SigningKeyPair::from_secret_bytes()` to create signing keypair from raw bytes
+
+### Examples
+
+```bash
+# Generate keys with mnemonic backup
+anyhide keygen alice --show-mnemonic
+# Shows 24 words for both encryption and signing keys
+
+# Export existing key as mnemonic
+anyhide export-mnemonic alice.key
+# Output: 24 words
+
+# Restore key from mnemonic
+anyhide import-mnemonic -o restored
+# Prompts for 24 words, creates restored.pub + restored.key
+
+# Restore signing key
+anyhide import-mnemonic -o restored --key-type signing
+# Creates restored.sign.pub + restored.sign.key
+
+# Add contact
+anyhide contacts add bob /path/to/bob.pub
+anyhide contacts add bob /path/to/bob.pub --signing /path/to/bob.sign.pub
+
+# Use contact in encode
+anyhide encode -m "Hello" -c carrier.txt -p pass --to bob
+# Instead of --their-key /path/to/bob.pub
+
+# Show contact with fingerprint
+anyhide contacts show bob
+# Shows paths and emoji fingerprint for verification
+```
+
 ## [0.9.1] - 2025-12-17
 
 ### Security

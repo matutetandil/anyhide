@@ -105,6 +105,19 @@ impl KeyPair {
         }
     }
 
+    /// Creates a key pair from raw secret bytes (for mnemonic import).
+    ///
+    /// The public key is derived from the secret key.
+    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Self {
+        let secret = StaticSecret::from(*bytes);
+        let public = PublicKey::from(&secret);
+        Self {
+            secret,
+            public,
+            key_type: KeyType::LongTerm,
+        }
+    }
+
     /// Returns the key type (long-term or ephemeral).
     pub fn key_type(&self) -> KeyType {
         self.key_type

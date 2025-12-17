@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::Args;
 
+use anyhide::contacts::ContactsConfig;
 use anyhide::crypto::{
     load_public_key, load_signing_key, save_ephemeral_private_key_pem,
     load_unified_keys_for_contact, update_unified_private_key,
@@ -47,6 +48,11 @@ pub struct EncodeCommand {
     /// [DEPRECATED: use --their-key] Path to recipient's public key
     #[arg(short, long)]
     pub key: Option<PathBuf>,
+
+    /// Contact alias from ~/.anyhide/contacts.toml
+    /// Use instead of --their-key for configured contacts
+    #[arg(long, conflicts_with_all = ["their_key", "key"])]
+    pub to: Option<String>,
 
     /// Path to recipient's public key (their .pub or ephemeral .pub file)
     #[arg(long)]
@@ -368,6 +374,39 @@ impl EncodeCommand {
     /// Resolves the recipient's public key from various sources.
     /// Returns (public_key, optional_eph_store_info)
     fn resolve_their_public_key(&self) -> Result<(x25519_dalek::PublicKey, Option<EphStoreInfo>)> {
+        // Priority 0: Contact alias from ~/.anyhide/contacts.toml
+        if let Some(alias) = &self.to {
+            let contacts = ContactsConfig::load()
+                .context("Failed to load contacts config")?;
+
+            let contact = contacts.get(alias).ok_or_else(|| {
+                let available: Vec<_> = contacts.list().iter().map(|(n, _)| *n).collect();
+                let available_str = if available.is_empty() {
+                    "none configured".to_string()
+                } else {
+                    available.join(", ")
+                };
+                anyhow::anyhow!(
+                    "Contact '{}' not found.\n  \
+                     Available contacts: {}\n  \
+                     Add with: anyhide contacts add {} <key-path>",
+                    alias, available_str, alias
+                )
+            })?;
+
+            let public_key = load_public_key(&contact.public_key)
+                .with_context(|| format!(
+                    "Failed to load public key for contact '{}' from {}",
+                    alias, contact.public_key.display()
+                ))?;
+
+            if self.verbose {
+                eprintln!("Using contact '{}' ({})", alias, contact.public_key.display());
+            }
+
+            return Ok((public_key, None));
+        }
+
         // Priority 1: Unified ephemeral store (.eph)
         if let Some(eph_path) = &self.eph_file {
             let contact = self.contact.as_ref().ok_or_else(|| {
@@ -438,6 +477,7 @@ impl EncodeCommand {
 
         anyhow::bail!(
             "No recipient public key specified. Use one of:\n  \
+             - --to <alias>                              (contact from ~/.anyhide/contacts.toml)\n  \
              - --their-key <path>                        (recipient's .pub file)\n  \
              - --eph-file <path> --contact <name>        (unified .eph store)\n  \
              - --eph-keys <path> --eph-pubs <path> --contact <name>  (separated stores)"

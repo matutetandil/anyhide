@@ -75,6 +75,7 @@ pub const BLOCK_SIZE: usize = 256;
 /// Minimum message size before padding (in characters)
 pub const MIN_SIZE: usize = 64;
 
+pub mod contacts;
 pub mod crypto;
 pub mod decoder;
 pub mod encoder;
@@ -83,6 +84,11 @@ pub mod text;
 
 // Re-export commonly used types at the crate root
 pub use crypto::{KeyPair, KeyType, SigningKeyPair};
+
+// Re-export mnemonic backup functions
+pub use crypto::{
+    key_to_mnemonic, mnemonic_to_key, validate_mnemonic, format_mnemonic, MnemonicError,
+};
 
 // Re-export ephemeral key functions for forward secrecy ratchet
 pub use crypto::{
@@ -115,3 +121,6 @@ pub use encoder::{
 pub use qr::{decode_base45, encode_base45, generate_qr, read_qr, QrError, QrFormat};
 pub use text::carrier::{fragment_bytes_for_carrier, BinaryCarrierSearch, BinaryFragment, Carrier};
 pub use text::fragment::FoundFragment;
+
+// Re-export contacts module for managing contact aliases
+pub use contacts::{Contact, ContactsConfig, ContactsError, get_config_dir, resolve_contact_key};

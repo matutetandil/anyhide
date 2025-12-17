@@ -6,8 +6,8 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use anyhide::crypto::{
-    save_private_key_for_contact, save_public_key_for_contact, save_unified_keys_for_contact,
-    KeyPair, SigningKeyPair,
+    format_mnemonic, key_to_mnemonic, save_private_key_for_contact, save_public_key_for_contact,
+    save_unified_keys_for_contact, KeyPair, SigningKeyPair,
 };
 
 use super::CommandExecutor;
@@ -38,10 +38,22 @@ pub struct KeygenCommand {
     /// Path to .eph file (unified storage, requires --contact)
     #[arg(long)]
     pub eph_file: Option<PathBuf>,
+
+    /// Show mnemonic backup phrases for long-term keys (24 words each)
+    /// Write these down for paper backup. Not available for ephemeral keys.
+    #[arg(long)]
+    pub show_mnemonic: bool,
 }
 
 impl CommandExecutor for KeygenCommand {
     fn execute(&self) -> Result<()> {
+        // Warn if --show-mnemonic is used with --ephemeral
+        if self.show_mnemonic && self.ephemeral {
+            eprintln!("WARNING: --show-mnemonic is ignored for ephemeral keys.");
+            eprintln!("         Ephemeral keys rotate per message and should not be backed up.");
+            eprintln!();
+        }
+
         if self.ephemeral {
             self.generate_ephemeral()
         } else {
@@ -95,6 +107,47 @@ impl KeygenCommand {
         println!("  - Verify your signatures (use .sign.pub)");
         println!();
         println!("Keep your private keys (.key, .sign.key) secret and secure.");
+
+        // Show mnemonic backup if requested
+        if self.show_mnemonic {
+            self.show_mnemonic_backup(&keypair, &signing_keypair)?;
+        }
+
+        Ok(())
+    }
+
+    /// Display mnemonic backup phrases for the keys.
+    fn show_mnemonic_backup(&self, keypair: &KeyPair, signing_keypair: &SigningKeyPair) -> Result<()> {
+        println!();
+        println!("============================================================");
+        println!("                  MNEMONIC BACKUP PHRASES");
+        println!("============================================================");
+        println!();
+        println!("Write these down on paper and store in a safe place.");
+        println!("Anyone with these words can restore your private keys.");
+        println!();
+
+        // Get encryption key bytes
+        let encryption_bytes: [u8; 32] = *keypair.secret_key().as_bytes();
+        let encryption_words = key_to_mnemonic(&encryption_bytes);
+
+        println!("ENCRYPTION KEY ({})", self.output.with_extension("key").display());
+        println!("------------------------");
+        println!("{}", format_mnemonic(&encryption_words));
+        println!();
+
+        // Get signing key bytes
+        let signing_bytes: [u8; 32] = signing_keypair.signing_key().to_bytes();
+        let signing_words = key_to_mnemonic(&signing_bytes);
+
+        println!("SIGNING KEY ({}.sign.key)", self.output.display());
+        println!("------------------------");
+        println!("{}", format_mnemonic(&signing_words));
+        println!();
+        println!("To restore: anyhide import-mnemonic -o <output>");
+        println!("            anyhide import-mnemonic -o <output> --key-type signing");
+        println!();
+        println!("IMPORTANT: Verify fingerprints match after restoration!");
 
         Ok(())
     }

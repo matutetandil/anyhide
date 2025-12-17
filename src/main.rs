@@ -9,9 +9,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    CommandExecutor, DecodeCommand, EncodeCommand, FingerprintCommand, KeygenCommand,
-    MultiDecryptCommand, MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand,
-    UpdateCommand,
+    CommandExecutor, ContactsCommand, DecodeCommand, EncodeCommand, ExportMnemonicCommand,
+    FingerprintCommand, ImportMnemonicCommand, KeygenCommand, MultiDecryptCommand,
+    MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand, UpdateCommand,
 };
 
 /// Anyhide - Hide anything in anything
@@ -28,7 +28,7 @@ use commands::{
 /// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
 #[command(name = "anyhide")]
-#[command(version = "0.9.1")]
+#[command(version = "0.10.0")]
 #[command(about = "Hide anything in anything - advanced steganography with encryption")]
 #[command(long_about = None)]
 struct Cli {
@@ -49,6 +49,17 @@ enum Commands {
 
     /// Display a key's fingerprint for verification
     Fingerprint(FingerprintCommand),
+
+    /// Manage contacts with aliases
+    Contacts(ContactsCommand),
+
+    /// Export a key as a 24-word mnemonic phrase
+    #[command(name = "export-mnemonic")]
+    ExportMnemonic(ExportMnemonicCommand),
+
+    /// Import a key from a 24-word mnemonic phrase
+    #[command(name = "import-mnemonic")]
+    ImportMnemonic(ImportMnemonicCommand),
 
     /// Encrypt a message for multiple recipients
     #[command(name = "multi-encrypt")]
@@ -82,6 +93,9 @@ fn main() -> Result<()> {
         Commands::Encode(cmd) => cmd.execute(),
         Commands::Decode(cmd) => cmd.execute(),
         Commands::Fingerprint(cmd) => cmd.execute(),
+        Commands::Contacts(cmd) => cmd.execute(),
+        Commands::ExportMnemonic(cmd) => cmd.execute(),
+        Commands::ImportMnemonic(cmd) => cmd.execute(),
         Commands::MultiEncrypt(cmd) => cmd.execute(),
         Commands::MultiDecrypt(cmd) => cmd.execute(),
         Commands::QrGenerate(cmd) => cmd.execute(),

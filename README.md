@@ -55,6 +55,8 @@ Anyhide uses a **pre-shared carrier** model:
 - **Forward secrecy ratchet**: Key rotation per message - past messages stay secure even if keys leak
 - **Ephemeral keys**: Generate rotating keys for perfect forward secrecy
 - **Key fingerprints**: Verify keys out-of-band (hex, emoji, visual art)
+- **Mnemonic backup**: Export/import keys as 24-word BIP39 phrases for paper backup
+- **Contacts with aliases**: Save contacts in `~/.anyhide/contacts.toml`, use `--to alice`
 - **Duress password**: Two messages, two passphrases - reveal the decoy under coercion
 - **Message signing**: Ed25519 signatures for sender authentication
 - **Message expiration**: Auto-expiring messages
@@ -132,6 +134,7 @@ anyhide keygen [OPTIONS] -o <name>
 Options:
   -o, --output <PATH>      Output path for keys (default: anyhide)
   --ephemeral              Generate ephemeral keys for forward secrecy
+  --show-mnemonic          Show 24-word backup phrases (long-term keys only)
   --contact <NAME>         Contact name (required for consolidated storage)
   --eph-keys <PATH>        Path to .eph.key file (consolidated private keys)
   --eph-pubs <PATH>        Path to .eph.pub file (consolidated public keys)
@@ -139,6 +142,10 @@ Options:
 
 # Long-term keys (default)
 anyhide keygen -o mykeys
+
+# Long-term keys with mnemonic backup phrases
+anyhide keygen -o mykeys --show-mnemonic
+# Shows 24-word phrases for both encryption and signing keys
 # Creates: mykeys.pub, mykeys.key, mykeys.sign.pub, mykeys.sign.key
 
 # Ephemeral keys (individual files)
@@ -167,6 +174,7 @@ Options:
 
 Key options (choose one):
   --their-key <PATH>       Recipient's public key (.pub file)
+  --to <ALIAS>             Contact alias (from ~/.anyhide/contacts.toml)
   --eph-file <PATH>        Unified ephemeral key store (.eph)
   --eph-keys <PATH>        Separated ephemeral private keys (.eph.key)
   --eph-pubs <PATH>        Separated ephemeral public keys (.eph.pub)
@@ -263,6 +271,62 @@ Visual Fingerprint:
   |         . o.Oo= |
   |          E ..*  |
   +-----------------+
+```
+
+### Mnemonic Backup
+
+Export and import long-term keys as 24-word BIP39 phrases for paper backup.
+
+```bash
+# Export existing key to mnemonic
+anyhide export-mnemonic mykeys.key
+# Shows 24 words for paper backup
+
+# Export signing key
+anyhide export-mnemonic mykeys.sign.key
+
+# Import encryption key from mnemonic (interactive)
+anyhide import-mnemonic -o restored
+# Enter 24 words when prompted
+# Creates: restored.key, restored.pub
+
+# Import signing key from mnemonic
+anyhide import-mnemonic -o restored --key-type signing
+# Creates: restored.sign.key, restored.sign.pub
+```
+
+**Important:** Mnemonic backup is only for long-term private keys (`.key`, `.sign.key`). Ephemeral keys rotate per message and should not be backed up.
+
+### Contacts
+
+Manage contacts with aliases to avoid typing full paths.
+
+```bash
+# Add a contact
+anyhide contacts add alice /path/to/alice.pub
+anyhide contacts add alice /path/to/alice.pub --signing-key /path/to/alice.sign.pub
+
+# List all contacts
+anyhide contacts list
+
+# Show contact details with fingerprint
+anyhide contacts show alice
+
+# Remove a contact
+anyhide contacts remove alice
+
+# Use contact in encode
+anyhide encode -c carrier.txt -m "Hello" -p "pass" --to alice
+```
+
+Contacts are stored in `~/.anyhide/contacts.toml`:
+```toml
+[contacts.alice]
+public_key = "/path/to/alice.pub"
+signing_key = "/path/to/alice.sign.pub"
+
+[contacts.bob]
+public_key = "/path/to/bob.pub"
 ```
 
 ### Other Commands
@@ -511,4 +575,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.8.1 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.10.0 (see [CHANGELOG.md](CHANGELOG.md))

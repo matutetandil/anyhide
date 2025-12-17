@@ -10,9 +10,11 @@
 //! - Digital signatures (Ed25519)
 
 pub mod asymmetric;
+pub mod bip39_english;
 pub mod compression;
 pub mod ephemeral_store;
 pub mod keys;
+pub mod mnemonic;
 pub mod multi_recipient;
 pub mod signing;
 pub mod symmetric;
@@ -45,6 +47,9 @@ pub use signing::{
     sign_message, verify_signature, SigningError, SigningKeyPair,
 };
 pub use symmetric::{decrypt_symmetric, encrypt_symmetric, SymmetricError};
+pub use mnemonic::{
+    key_to_mnemonic, mnemonic_to_key, validate_mnemonic, format_mnemonic, MnemonicError,
+};
 
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
