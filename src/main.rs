@@ -9,8 +9,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    CommandExecutor, DecodeCommand, EncodeCommand, KeygenCommand, MultiDecryptCommand,
-    MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand, UpdateCommand,
+    CommandExecutor, DecodeCommand, EncodeCommand, FingerprintCommand, KeygenCommand,
+    MultiDecryptCommand, MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand,
+    UpdateCommand,
 };
 
 /// Anyhide - Hide anything in anything
@@ -46,6 +47,9 @@ enum Commands {
     /// Decode an encrypted code back to message or file
     Decode(DecodeCommand),
 
+    /// Display a key's fingerprint for verification
+    Fingerprint(FingerprintCommand),
+
     /// Encrypt a message for multiple recipients
     #[command(name = "multi-encrypt")]
     MultiEncrypt(MultiEncryptCommand),
@@ -77,6 +81,7 @@ fn main() -> Result<()> {
         Commands::Keygen(cmd) => cmd.execute(),
         Commands::Encode(cmd) => cmd.execute(),
         Commands::Decode(cmd) => cmd.execute(),
+        Commands::Fingerprint(cmd) => cmd.execute(),
         Commands::MultiEncrypt(cmd) => cmd.execute(),
         Commands::MultiDecrypt(cmd) => cmd.execute(),
         Commands::QrGenerate(cmd) => cmd.execute(),

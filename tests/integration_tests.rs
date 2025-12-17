@@ -736,3 +736,33 @@ fn test_automatic_ratchet_with_unified_store() {
     // Alice got Bob's next public key
     assert!(decoded_reply.next_public_key.is_some());
 }
+
+/// Test key fingerprint consistency
+#[test]
+fn test_key_fingerprint_consistency() {
+    use sha2::{Sha256, Digest};
+
+    let keypair1 = KeyPair::generate();
+    let keypair2 = KeyPair::generate();
+
+    // Calculate fingerprint for keypair1
+    let mut hasher1 = Sha256::new();
+    hasher1.update(keypair1.public_key().as_bytes());
+    let fp1: [u8; 32] = hasher1.finalize().into();
+
+    // Calculate fingerprint again for keypair1 (should be same)
+    let mut hasher1b = Sha256::new();
+    hasher1b.update(keypair1.public_key().as_bytes());
+    let fp1b: [u8; 32] = hasher1b.finalize().into();
+
+    // Calculate fingerprint for keypair2 (should be different)
+    let mut hasher2 = Sha256::new();
+    hasher2.update(keypair2.public_key().as_bytes());
+    let fp2: [u8; 32] = hasher2.finalize().into();
+
+    // Same key = same fingerprint
+    assert_eq!(fp1, fp1b);
+
+    // Different keys = different fingerprints
+    assert_ne!(fp1, fp2);
+}

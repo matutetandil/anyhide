@@ -54,6 +54,7 @@ Anyhide uses a **pre-shared carrier** model:
 - **Dual-layer encryption**: Symmetric (ChaCha20) + Asymmetric (X25519)
 - **Forward secrecy ratchet**: Key rotation per message - past messages stay secure even if keys leak
 - **Ephemeral keys**: Generate rotating keys for perfect forward secrecy
+- **Key fingerprints**: Verify keys out-of-band (hex, emoji, visual art)
 - **Message signing**: Ed25519 signatures for sender authentication
 - **Message expiration**: Auto-expiring messages
 - **Code splitting**: Split codes for multi-channel delivery
@@ -215,6 +216,48 @@ Other options:
   --verify <PATH>          Verify signature with sender's public key
   -o, --output <PATH>      Output file (required for binary)
   -v, --verbose            Show details
+```
+
+### Fingerprint
+
+Display a key's fingerprint for out-of-band verification (like Signal/WhatsApp).
+
+```bash
+anyhide fingerprint <KEY_PATH> [OPTIONS]
+
+Options:
+  -f, --format <FMT>     Output format: hex, emoji, art, or all (default: all)
+
+# Show all fingerprint formats
+anyhide fingerprint alice.pub
+
+# Show only emoji fingerprint (easy to compare by phone)
+anyhide fingerprint alice.pub -f emoji
+```
+
+Output example:
+```
+Key: alice.pub
+
+Hex Fingerprint:
+  75EC37D4 51EBEDE4 E4AA4182 FD719560
+  BE3E765C CE49A772 597A0ACF 09AC05FA
+
+Emoji Fingerprint:
+  🌲 🚂 🌺 🦊 🐺 ⛵ 🏎️ 🎻
+
+Visual Fingerprint:
+  +-----------------+
+  |             o .o|
+  |           .o ..+|
+  |          . o..oo|
+  |         + o .o..|
+  |        S + +.+oB|
+  |         . *.+o#+|
+  |        .   O+=+B|
+  |         . o.Oo= |
+  |          E ..*  |
+  +-----------------+
 ```
 
 ### Other Commands

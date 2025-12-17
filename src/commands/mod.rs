@@ -5,6 +5,7 @@
 
 mod decode;
 mod encode;
+mod fingerprint;
 mod keygen;
 mod multi_decrypt;
 mod multi_encrypt;
@@ -15,6 +16,7 @@ mod update;
 
 pub use decode::DecodeCommand;
 pub use encode::EncodeCommand;
+pub use fingerprint::FingerprintCommand;
 pub use keygen::KeygenCommand;
 pub use multi_decrypt::MultiDecryptCommand;
 pub use multi_encrypt::MultiEncryptCommand;
