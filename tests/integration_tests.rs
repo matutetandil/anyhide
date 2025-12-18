@@ -997,3 +997,132 @@ fn test_contacts_config_crud_integration() {
     assert_eq!(config.len(), 1);
     assert!(!config.contains("alice"));
 }
+
+// ============================================================================
+// Chat Tests (v0.11.0)
+// ============================================================================
+
+/// Test chat session establishment and message exchange
+#[test]
+fn test_chat_session_message_exchange() {
+    use anyhide::chat::{generate_carriers, ChatConfig, ChatSession};
+    use ed25519_dalek::SigningKey;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    // Generate keypairs for Alice (initiator) and Bob (responder)
+    let alice_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let alice_eph_public = PublicKey::from(&alice_eph_secret);
+    let alice_signing = SigningKey::generate(&mut rand::rngs::OsRng);
+    let alice_verifying = alice_signing.verifying_key();
+
+    let bob_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let bob_eph_public = PublicKey::from(&bob_eph_secret);
+    let bob_signing = SigningKey::generate(&mut rand::rngs::OsRng);
+    let bob_verifying = bob_signing.verifying_key();
+
+    // Generate carriers
+    let config = ChatConfig::default();
+    let alice_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
+    let bob_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
+
+    // Shared passphrase for the chat session
+    let passphrase = "test_chat_passphrase";
+
+    // Initialize sessions
+    let mut alice = ChatSession::init_as_initiator(
+        alice_eph_secret,
+        &alice_signing,
+        bob_eph_public,
+        bob_verifying,
+        alice_carriers.clone(),
+        bob_carriers.clone(),
+        config.clone(),
+        passphrase,
+    )
+    .expect("Alice session init");
+
+    let mut bob = ChatSession::init_as_responder(
+        bob_eph_secret,
+        &bob_signing,
+        alice_eph_public,
+        alice_verifying,
+        bob_carriers,
+        alice_carriers,
+        config,
+        passphrase,
+    )
+    .expect("Bob session init");
+
+    // Alice sends to Bob
+    let wire1 = alice.send_message("Hello Bob!").expect("Alice send");
+    let msg1 = bob.receive_message(&wire1).expect("Bob receive");
+    assert_eq!(msg1, "Hello Bob!");
+
+    // Bob replies to Alice
+    let wire2 = bob.send_message("Hi Alice!").expect("Bob send");
+    let msg2 = alice.receive_message(&wire2).expect("Alice receive");
+    assert_eq!(msg2, "Hi Alice!");
+
+    // Multiple back-and-forth
+    let wire3 = alice.send_message("How are you?").expect("Alice send 2");
+    let msg3 = bob.receive_message(&wire3).expect("Bob receive 2");
+    assert_eq!(msg3, "How are you?");
+
+    let wire4 = bob.send_message("I'm great, thanks!").expect("Bob send 2");
+    let msg4 = alice.receive_message(&wire4).expect("Alice receive 2");
+    assert_eq!(msg4, "I'm great, thanks!");
+
+    // Note: messages_sent/received return sequence numbers within current chain,
+    // which reset on DH ratchet. After direction changes, seq resets to 0.
+    // The important thing is that messages are exchanged correctly.
+}
+
+/// Test chat forward secrecy through DH ratchet
+#[test]
+fn test_chat_forward_secrecy() {
+    use anyhide::chat::{generate_carriers, ChatConfig, ChatSession};
+    use ed25519_dalek::SigningKey;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    // Setup
+    let alice_eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let alice_pub = PublicKey::from(&alice_eph);
+    let alice_sign = SigningKey::generate(&mut rand::rngs::OsRng);
+
+    let bob_eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let bob_pub = PublicKey::from(&bob_eph);
+    let bob_sign = SigningKey::generate(&mut rand::rngs::OsRng);
+
+    let config = ChatConfig::default();
+    let alice_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
+    let bob_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
+    let passphrase = "test_forward_secrecy";
+
+    let mut alice = ChatSession::init_as_initiator(
+        alice_eph, &alice_sign, bob_pub, bob_sign.verifying_key(),
+        alice_carriers.clone(), bob_carriers.clone(), config.clone(), passphrase,
+    ).unwrap();
+
+    let mut bob = ChatSession::init_as_responder(
+        bob_eph, &bob_sign, alice_pub, alice_sign.verifying_key(),
+        bob_carriers, alice_carriers, config, passphrase,
+    ).unwrap();
+
+    // Exchange 10 messages in alternating directions
+    for i in 0..10 {
+        if i % 2 == 0 {
+            let wire = alice.send_message(&format!("Message {}", i)).unwrap();
+            let msg = bob.receive_message(&wire).unwrap();
+            assert_eq!(msg, format!("Message {}", i));
+        } else {
+            let wire = bob.send_message(&format!("Reply {}", i)).unwrap();
+            let msg = alice.receive_message(&wire).unwrap();
+            assert_eq!(msg, format!("Reply {}", i));
+        }
+    }
+
+    // Session should still work after multiple ratchets
+    let final_wire = alice.send_message("Final message").unwrap();
+    let final_msg = bob.receive_message(&final_wire).unwrap();
+    assert_eq!(final_msg, "Final message");
+}

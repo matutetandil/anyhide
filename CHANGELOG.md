@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2025-12-18
+
+### Added
+
+- **P2P Chat over Tor**
+  - Real-time encrypted chat using Tor hidden services
+  - Simple command: `anyhide chat <contact>` - no server/client distinction
+  - Both peers are equal: both create hidden services and race to connect
+  - `anyhide chat init` - Initialize your chat identity
+  - `anyhide chat add/list/show/remove` - Manage chat contacts
+  - Double Ratchet protocol for forward secrecy
+  - Random carrier generation at handshake time
+  - Ed25519 signature verification for message authenticity
+  - Bidirectional connection with `tokio::select!` - first to connect wins
+  - User passphrase required for each session (combined with DH-derived keys)
+
+- **Terminal User Interface (TUI)**
+  - Visual chat interface built with ratatui
+  - Three-panel layout: header (status), messages, input
+  - Color-coded messages: green (you), blue (peer), yellow (system)
+  - Connection status indicator with message counters
+  - Character counter showing remaining chars (max 256)
+  - Input limit enforced - cannot exceed max length
+  - Counter turns yellow (<20 chars) and red (0 chars)
+  - Scroll support for message history (Page Up/Down, Ctrl+Up/Down)
+  - Chat commands: `/quit`, `/status`, `/help`, `/clear`
+  - Keyboard shortcuts: Ctrl+C to quit, Enter to send
+
+- **Async Runtime Migration**
+  - Full async support using tokio runtime
+  - `MessageTransport` trait converted to async
+  - TCP transport migrated to `tokio::net`
+  - Concurrent message handling with `tokio::select!`
+
+- **Tor Transport (always included)**
+  - `AnyhideTorClient` - Tor client wrapper using arti-client v0.37
+  - `TorConnection` - Bidirectional message stream over Tor
+  - `TorListener` - Accept connections on a hidden service
+  - Custom .onion address generation from HsId
+  - Security warnings about Arti's experimental status
+
+- **Chat Configuration**
+  - Chat contacts stored in `~/.anyhide/chat.toml`
+  - Separate from regular contacts (chat requires .onion addresses)
+  - Identity configuration with key paths
+
+### Dependencies
+
+- Added `arti-client` v0.37
+- Added `tor-rtcompat` v0.37
+- Added `tor-hsservice` v0.37
+- Added `tor-hscrypto` v0.37
+- Added `tor-cell` v0.37
+- Added `futures` v0.3
+- Added `async-trait` v0.1
+- Added `ratatui` v0.29
+- Added `crossterm` v0.28
+
+### Security Notes
+
+- **Arti Warning**: Arti's onion services are experimental and not as secure as C-Tor
+- **Tor-Only Chat**: All chat traffic goes through Tor - no plaintext option
+- **Random Carriers**: Carriers are generated with CSPRNG at handshake time
+- **Forward Secrecy**: DH ratchet on direction change protects past messages
+
+### Fixed
+
+- **Hidden passphrase input** - Passphrase is now hidden when typing (uses rpassword)
+- **Onion address checksum** - Fixed v3 .onion address generation using SHA3-256 (was incorrectly using SHA2-256)
+- **Handshake data transmission** - Binary handshake data is now Base64 encoded to prevent corruption
+- **Sign key path handling** - Fixed path normalization to accept both `alice` and `alice.sign.key` formats
+- **Onion address available at init** - Your .onion address is now generated and saved during `chat init` (no longer requires starting a chat)
+- **Message character limit** - Fixed to 256 characters (was incorrectly set to 1024)
+- **Input text scrolling** - Long input text now scrolls horizontally, keeping cursor visible
+- **Message text wrapping** - Long messages now wrap at word boundaries with indentation on continuation lines
+- **Connection reliability** - Automatic retry on connection and handshake failures (Tor circuits can be flaky)
+
+### Added (Post-Release Fixes)
+
+- **Profile support for local testing** - `--profile <name>` flag allows running multiple identities on the same machine
+  - Each profile gets separate config: `~/.config/anyhide/chat-<profile>.toml`
+  - Each profile gets separate Tor state: `~/.local/share/anyhide/tor/<profile>/`
+  - Useful for testing chat locally between two terminals
+- **`chat show me` command** - View your own identity and .onion address
+- **Proper Tor directory permissions** - State directories are created with 0700 permissions (required by Arti)
+
+### Dependencies (Additional)
+
+- Added `rpassword` v7.0 for hidden password input
+- Added `sha3` v0.10 for proper onion address checksum calculation
+
+### Examples
+
+```bash
+# Setup (one time)
+anyhide keygen -o alice
+anyhide keygen -o alice --signing
+anyhide chat init -k alice -s alice.sign
+anyhide chat add bob xyz.onion --key bob.pub --sign-key bob.sign.pub
+
+# Start chatting
+anyhide chat bob
+# Enter passphrase when prompted (input is hidden)
+
+# Local testing with profiles (two terminals on same machine)
+# Terminal 1:
+anyhide chat --profile alice init -k alice -s alice.sign
+anyhide chat --profile alice add bob <bob.onion> --key bob.pub --sign-key bob.sign.pub
+anyhide chat --profile alice bob
+
+# Terminal 2:
+anyhide chat --profile bob init -k bob -s bob.sign
+anyhide chat --profile bob add alice <alice.onion> --key alice.pub --sign-key alice.sign.pub
+anyhide chat --profile bob alice
+
+# TUI Interface:
+# ┌─ Anyhide Chat - bob ─────────────────────────────────┐
+# │ Connected | abc123...onion | 2↑ 1↓                   │
+# ├──────────────────────────────────────────────────────┤
+# │                                                      │
+# │  [14:32] Connected to bob                            │
+# │  [14:32] Type /help for commands. Ctrl+C to quit.    │
+# │  [14:33] you: Hello Bob!                             │
+# │  [14:33] bob: Hi Alice!                              │
+# │                                                      │
+# ├─ Input ──────────────────────────────────────────────┤
+# │ > your message here...                  11/256       │
+# └──────────────────────────────────────────────────────┘
+
+# Commands: /quit, /status, /help, /clear
+```
+
 ## [0.10.0] - 2025-12-17
 
 ### Added

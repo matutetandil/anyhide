@@ -75,6 +75,7 @@ pub const BLOCK_SIZE: usize = 256;
 /// Minimum message size before padding (in characters)
 pub const MIN_SIZE: usize = 64;
 
+pub mod chat;
 pub mod contacts;
 pub mod crypto;
 pub mod decoder;

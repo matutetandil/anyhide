@@ -1,6 +1,6 @@
 [package]
 name = "anyhide"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Hide any data in any file - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"
@@ -28,6 +28,7 @@ serde_json = "1.0"
 toml = "0.8"
 bincode = "1.3"
 base64 = "0.22"
+hex = "0.4"
 
 # Config directory
 dirs = "5.0"
@@ -52,6 +53,31 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
+
+# Security - memory zeroization
+zeroize = { version = "1.7", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full", "io-util", "net", "sync", "rt-multi-thread", "macros"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Tor client (arti) - required for P2P chat
+arti-client = { version = "0.37", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service"] }
+tor-rtcompat = { version = "0.37", default-features = false, features = ["tokio", "rustls"] }
+tor-hsservice = { version = "0.37", default-features = false }
+tor-hscrypto = { version = "0.37", default-features = false }
+tor-cell = { version = "0.37", default-features = false }
+
+# TUI (Terminal User Interface)
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Password input (hidden)
+rpassword = "7.0"
+
+# SHA3 for onion address checksum
+sha3 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.0"

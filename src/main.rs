@@ -9,9 +9,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    CommandExecutor, ContactsCommand, DecodeCommand, EncodeCommand, ExportMnemonicCommand,
-    FingerprintCommand, ImportMnemonicCommand, KeygenCommand, MultiDecryptCommand,
-    MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand, UpdateCommand,
+    ChatCommand, CommandExecutor, ContactsCommand, DecodeCommand, EncodeCommand,
+    ExportMnemonicCommand, FingerprintCommand, ImportMnemonicCommand, KeygenCommand,
+    MultiDecryptCommand, MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand,
+    UpdateCommand,
 };
 
 /// Anyhide - Hide anything in anything
@@ -28,7 +29,7 @@ use commands::{
 /// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
 #[command(name = "anyhide")]
-#[command(version = "0.10.0")]
+#[command(version = "0.11.0")]
 #[command(about = "Hide anything in anything - advanced steganography with encryption")]
 #[command(long_about = None)]
 struct Cli {
@@ -52,6 +53,9 @@ enum Commands {
 
     /// Manage contacts with aliases
     Contacts(ContactsCommand),
+
+    /// P2P encrypted chat (TCP for now, Tor coming soon)
+    Chat(ChatCommand),
 
     /// Export a key as a 24-word mnemonic phrase
     #[command(name = "export-mnemonic")]
@@ -94,6 +98,7 @@ fn main() -> Result<()> {
         Commands::Decode(cmd) => cmd.execute(),
         Commands::Fingerprint(cmd) => cmd.execute(),
         Commands::Contacts(cmd) => cmd.execute(),
+        Commands::Chat(cmd) => cmd.execute(),
         Commands::ExportMnemonic(cmd) => cmd.execute(),
         Commands::ImportMnemonic(cmd) => cmd.execute(),
         Commands::MultiEncrypt(cmd) => cmd.execute(),

@@ -57,6 +57,7 @@ Anyhide uses a **pre-shared carrier** model:
 - **Key fingerprints**: Verify keys out-of-band (hex, emoji, visual art)
 - **Mnemonic backup**: Export/import keys as 24-word BIP39 phrases for paper backup
 - **Contacts with aliases**: Save contacts in `~/.anyhide/contacts.toml`, use `--to alice`
+- **P2P Chat over Tor**: Real-time encrypted chat via Tor hidden services (experimental)
 - **Duress password**: Two messages, two passphrases - reveal the decoy under coercion
 - **Message signing**: Ed25519 signatures for sender authentication
 - **Message expiration**: Auto-expiring messages
@@ -329,6 +330,104 @@ signing_key = "/path/to/alice.sign.pub"
 public_key = "/path/to/bob.pub"
 ```
 
+### P2P Chat over Tor
+
+Real-time encrypted chat using Tor hidden services. Both peers are equal - no server/client distinction.
+
+**Security Warning:** Arti's onion services are experimental and not as secure as C-Tor. Do not use for highly sensitive communications.
+
+**Setup (one time):**
+```bash
+# 1. Generate your keys (encryption + signing)
+anyhide keygen -o mykeys
+anyhide keygen -o mykeys --signing
+
+# 2. Initialize your chat identity (bootstraps Tor, shows your .onion)
+anyhide chat init -k mykeys -s mykeys.sign
+# Output: Your .onion address: xyz123abc.onion
+
+# 3. Add a contact (you need their .onion address and public keys)
+anyhide chat add bob <bob.onion> --key bob.pub --sign-key bob.sign.pub
+```
+
+**Start chatting:**
+```bash
+anyhide chat bob
+# Enter your passphrase when prompted (input is hidden)
+```
+
+That's it! The system will:
+1. Ask for your passphrase (required for encryption, input is hidden)
+2. Create your hidden service
+3. Try to connect to Bob's .onion address
+4. If Bob isn't online, wait for him to connect to you
+5. First successful connection (incoming or outgoing) establishes the session
+6. Launch the TUI (Terminal User Interface)
+
+**TUI Interface:**
+```
+┌─ Anyhide Chat - bob ─────────────────────────────────┐
+│ Connected | abc123...onion | 2↑ 1↓                   │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  [14:32] Connected to bob                            │
+│  [14:32] Type /help for commands. Ctrl+C to quit.    │
+│  [14:33] you: Hello Bob!                             │
+│  [14:33] bob: Hey Alice! How are you?                │
+│                                                      │
+├─ Input ──────────────────────────────────────────────┤
+│ > your message here...                  11/256       │
+└──────────────────────────────────────────────────────┘
+```
+
+The counter shows `current/max` characters. Turns yellow at <20 remaining, red at 0.
+
+**Chat management commands:**
+```bash
+anyhide chat init -k <keys> -s <sign>   # Initialize your identity (shows .onion)
+anyhide chat add <name> <onion> ...     # Add a contact
+anyhide chat list                       # List contacts
+anyhide chat show <name>                # Show contact details
+anyhide chat show me                    # Show your own identity and .onion
+anyhide chat remove <name>              # Remove a contact
+```
+
+**Local testing with profiles:**
+```bash
+# Run multiple identities on the same machine (for testing)
+# Terminal 1:
+anyhide chat --profile alice init -k alice -s alice.sign
+anyhide chat --profile alice add bob <bob.onion> --key bob.pub --sign-key bob.sign.pub
+anyhide chat --profile alice bob
+
+# Terminal 2:
+anyhide chat --profile bob init -k bob -s bob.sign
+anyhide chat --profile bob add alice <alice.onion> --key alice.pub --sign-key alice.sign.pub
+anyhide chat --profile bob alice
+```
+
+Each profile gets separate config and Tor state directories.
+
+**Chat session commands:**
+- `/quit` or `/q` - Exit the chat
+- `/status` or `/s` - Show session statistics
+- `/help` or `/h` - Show available commands
+- `/clear` or `/c` - Clear message history
+
+**Keyboard shortcuts:**
+- `Ctrl+C` or `Esc` - Quit
+- `Enter` - Send message
+- `Page Up/Down` - Scroll message history
+- `Ctrl+Up/Down` - Scroll one line
+
+**How it works:**
+1. Both parties initialize with `chat init` (creates their .onion identity)
+2. Exchange .onion addresses and public keys out-of-band
+3. Add each other with `chat add`
+4. Run `anyhide chat <contact>` - both peers create hidden services and race to connect
+5. First successful connection wins, handshake establishes encrypted session
+6. Messages encrypted with Double Ratchet protocol for forward secrecy
+
 ### Other Commands
 
 ```bash
@@ -575,4 +674,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.10.0 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.11.0 (see [CHANGELOG.md](CHANGELOG.md))

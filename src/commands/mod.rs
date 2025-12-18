@@ -3,6 +3,7 @@
 //! Each command is a separate module implementing the `CommandExecutor` trait.
 //! This provides clean separation of concerns and makes adding new commands easy.
 
+mod chat;
 mod contacts;
 mod decode;
 mod encode;
@@ -17,6 +18,7 @@ mod qr_info;
 mod qr_read;
 mod update;
 
+pub use chat::ChatCommand;
 pub use contacts::ContactsCommand;
 pub use decode::DecodeCommand;
 pub use encode::EncodeCommand;
