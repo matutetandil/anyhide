@@ -47,6 +47,31 @@ impl Carrier {
         }
     }
 
+    /// Creates a carrier from multiple files concatenated in order.
+    ///
+    /// **Order matters!** Different order = different carrier = different decoding result.
+    /// This provides N! additional security combinations for N carriers.
+    ///
+    /// - Single file: Delegates to `from_file()` (preserves text vs binary detection)
+    /// - Multiple files: All read as bytes and concatenated (always binary carrier)
+    pub fn from_files(paths: &[std::path::PathBuf]) -> std::io::Result<Self> {
+        if paths.is_empty() {
+            return Ok(Carrier::from_bytes(vec![]));
+        }
+
+        if paths.len() == 1 {
+            return Self::from_file(&paths[0]);
+        }
+
+        // Multiple files: read all as bytes and concatenate in order
+        let mut combined = Vec::new();
+        for path in paths {
+            let data = std::fs::read(path)?;
+            combined.extend(data);
+        }
+        Ok(Carrier::from_bytes(combined))
+    }
+
     /// Returns the length of the carrier (characters for text, bytes for binary).
     pub fn len(&self) -> usize {
         match self {
@@ -393,5 +418,59 @@ mod tests {
         for fragment in &fragments {
             assert!(!fragment.ends_word);
         }
+    }
+
+    #[test]
+    fn test_from_files_empty() {
+        let carrier = Carrier::from_files(&[]).unwrap();
+        assert!(carrier.is_empty());
+        assert!(carrier.is_binary());
+    }
+
+    #[test]
+    fn test_from_files_single_delegates_to_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Text file
+        let txt_path = dir.path().join("test.txt");
+        std::fs::write(&txt_path, "Hello World").unwrap();
+
+        let carrier = Carrier::from_files(&[txt_path]).unwrap();
+        assert!(!carrier.is_binary()); // Single .txt should be text carrier
+        assert_eq!(carrier.len(), 11);
+    }
+
+    #[test]
+    fn test_from_files_multiple_concatenates_as_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file1 = dir.path().join("a.bin");
+        let file2 = dir.path().join("b.bin");
+        std::fs::write(&file1, vec![1, 2, 3]).unwrap();
+        std::fs::write(&file2, vec![4, 5, 6]).unwrap();
+
+        let carrier = Carrier::from_files(&[file1, file2]).unwrap();
+        assert!(carrier.is_binary());
+        assert_eq!(carrier.len(), 6); // 3 + 3 bytes
+
+        // Verify concatenation order
+        assert_eq!(carrier.extract(0, 6), Some(vec![1, 2, 3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn test_from_files_order_matters() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file1 = dir.path().join("first.bin");
+        let file2 = dir.path().join("second.bin");
+        std::fs::write(&file1, vec![0xAA, 0xBB]).unwrap();
+        std::fs::write(&file2, vec![0xCC, 0xDD]).unwrap();
+
+        let carrier_ab = Carrier::from_files(&[file1.clone(), file2.clone()]).unwrap();
+        let carrier_ba = Carrier::from_files(&[file2, file1]).unwrap();
+
+        // Different order = different carrier content
+        assert_eq!(carrier_ab.extract(0, 4), Some(vec![0xAA, 0xBB, 0xCC, 0xDD]));
+        assert_eq!(carrier_ba.extract(0, 4), Some(vec![0xCC, 0xDD, 0xAA, 0xBB]));
     }
 }

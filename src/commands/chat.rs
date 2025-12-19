@@ -40,7 +40,8 @@ use anyhide::chat::{
     generate_carriers, ChatConfig, ChatSession, HandshakeComplete, HandshakeInit,
     HandshakeResponse, WireMessage,
 };
-use anyhide::crypto::{load_verifying_key, SigningKeyPair};
+use anyhide::crypto::{load_public_key, load_verifying_key, SigningKeyPair};
+use anyhide::qr::{generate_qr_to_file, read_qr_from_file, QrConfig, QrFormat};
 
 // Chat contacts configuration
 use serde::{Deserialize, Serialize};
@@ -146,6 +147,12 @@ pub struct ChatCommand {
     #[arg(long, default_value = "4096")]
     pub carrier_size: usize,
 
+    /// Pre-shared carrier file(s). Both parties must use the SAME files in the SAME order.
+    /// Order is a secret! Using multiple files provides N! additional security.
+    /// If not specified, random carriers are generated and exchanged during handshake.
+    #[arg(short = 'c', long = "carrier", num_args = 1..)]
+    pub carrier_files: Option<Vec<PathBuf>>,
+
     /// Profile name for separate identity (useful for local testing)
     #[arg(long, global = true)]
     pub profile: Option<String>,
@@ -217,6 +224,30 @@ pub enum ChatAction {
         /// Contact name
         name: String,
     },
+
+    /// Export your chat identity to a QR code
+    ExportQr {
+        /// Output file for QR code (default: identity.png)
+        #[arg(short, long, default_value = "identity.png")]
+        output: PathBuf,
+
+        /// QR format: png (default), svg, or ascii
+        #[arg(long, default_value = "png")]
+        format: String,
+    },
+
+    /// Import a chat contact from a QR code image
+    ImportQr {
+        /// Path to QR code image
+        image: PathBuf,
+
+        /// Contact name (alias)
+        #[arg(short, long)]
+        name: String,
+    },
+
+    /// Show your own identity and .onion address
+    Me,
 }
 
 impl CommandExecutor for ChatCommand {
@@ -231,7 +262,13 @@ impl CommandExecutor for ChatCommand {
         rt.block_on(async {
             // If a contact name is provided, start chat
             if let Some(contact) = &self.contact {
-                return start_chat(contact, self.carriers, self.carrier_size, profile).await;
+                return start_chat(
+                    contact,
+                    self.carriers,
+                    self.carrier_size,
+                    self.carrier_files.as_deref(),
+                    profile,
+                ).await;
             }
 
             // Otherwise, handle subcommand
@@ -250,6 +287,9 @@ impl CommandExecutor for ChatCommand {
                 Some(ChatAction::List) => list_contacts(),
                 Some(ChatAction::Show { name }) => show_contact(name),
                 Some(ChatAction::Remove { name }) => remove_contact(name),
+                Some(ChatAction::ExportQr { output, format }) => export_qr_identity(output, format),
+                Some(ChatAction::ImportQr { image, name }) => import_qr_contact(image, name),
+                Some(ChatAction::Me) => show_my_identity(),
                 None => {
                     println!("Usage:");
                     println!("  anyhide chat <contact>              Start chat with a contact");
@@ -258,6 +298,9 @@ impl CommandExecutor for ChatCommand {
                     println!("  anyhide chat list                       List contacts");
                     println!("  anyhide chat show <name>                Show contact details");
                     println!("  anyhide chat remove <name>              Remove a contact");
+                    println!("  anyhide chat export-qr [-o file.png]    Export identity to QR");
+                    println!("  anyhide chat import-qr <image> -n <name> Import contact from QR");
+                    println!("  anyhide chat me                         Show your identity");
                     Ok(())
                 }
             }
@@ -456,8 +499,297 @@ fn remove_contact(name: &str) -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// QR Code Identity Export/Import
+// =============================================================================
+
+/// Chat identity QR format version.
+const CHAT_QR_VERSION: u8 = 0x01;
+
+/// Magic bytes to identify Anyhide chat identity QR codes.
+const CHAT_QR_MAGIC: &[u8] = b"AHID"; // Anyhide ID
+
+/// Encode chat identity to binary format for QR.
+/// Format: [magic:4][version:1][onion:56][enc_key:32][sign_key:32][nick_len:1][nick:0-63]
+fn encode_chat_identity(
+    onion: &str,
+    enc_pubkey: &[u8; 32],
+    sign_pubkey: &[u8; 32],
+    nickname: &str,
+) -> Result<Vec<u8>> {
+    let mut data = Vec::with_capacity(128);
+
+    // Magic bytes
+    data.extend_from_slice(CHAT_QR_MAGIC);
+
+    // Version
+    data.push(CHAT_QR_VERSION);
+
+    // Onion address (56 bytes without ".onion")
+    let onion_clean = onion.trim_end_matches(".onion");
+    if onion_clean.len() != 56 {
+        bail!("Invalid onion address length: {} (expected 56)", onion_clean.len());
+    }
+    data.extend_from_slice(onion_clean.as_bytes());
+
+    // Encryption public key (32 bytes)
+    data.extend_from_slice(enc_pubkey);
+
+    // Signing public key (32 bytes)
+    data.extend_from_slice(sign_pubkey);
+
+    // Nickname (length byte + UTF-8 string, max 63 bytes)
+    let nick_bytes = nickname.as_bytes();
+    if nick_bytes.len() > 63 {
+        bail!("Nickname too long: {} bytes (max 63)", nick_bytes.len());
+    }
+    data.push(nick_bytes.len() as u8);
+    data.extend_from_slice(nick_bytes);
+
+    Ok(data)
+}
+
+/// Decode chat identity from binary format.
+/// Returns (onion, enc_pubkey, sign_pubkey, nickname).
+fn decode_chat_identity(data: &[u8]) -> Result<(String, [u8; 32], [u8; 32], String)> {
+    // Minimum size: magic(4) + version(1) + onion(56) + enc_key(32) + sign_key(32) + nick_len(1) = 126
+    if data.len() < 126 {
+        bail!("Invalid QR data: too short ({} bytes, min 126)", data.len());
+    }
+
+    let mut pos = 0;
+
+    // Check magic
+    if &data[pos..pos + 4] != CHAT_QR_MAGIC {
+        bail!("Invalid QR: not an Anyhide chat identity (wrong magic bytes)");
+    }
+    pos += 4;
+
+    // Check version
+    let version = data[pos];
+    if version != CHAT_QR_VERSION {
+        bail!("Unsupported QR version: {} (expected {})", version, CHAT_QR_VERSION);
+    }
+    pos += 1;
+
+    // Onion address (56 bytes)
+    let onion_bytes = &data[pos..pos + 56];
+    let onion = String::from_utf8(onion_bytes.to_vec())
+        .context("Invalid onion address encoding")?;
+    let onion_full = format!("{}.onion", onion);
+    pos += 56;
+
+    // Encryption public key (32 bytes)
+    let mut enc_pubkey = [0u8; 32];
+    enc_pubkey.copy_from_slice(&data[pos..pos + 32]);
+    pos += 32;
+
+    // Signing public key (32 bytes)
+    let mut sign_pubkey = [0u8; 32];
+    sign_pubkey.copy_from_slice(&data[pos..pos + 32]);
+    pos += 32;
+
+    // Nickname
+    let nick_len = data[pos] as usize;
+    pos += 1;
+
+    if pos + nick_len > data.len() {
+        bail!("Invalid QR data: nickname truncated");
+    }
+    let nickname = String::from_utf8(data[pos..pos + nick_len].to_vec())
+        .context("Invalid nickname encoding")?;
+
+    Ok((onion_full, enc_pubkey, sign_pubkey, nickname))
+}
+
+/// Export your chat identity to a QR code.
+fn export_qr_identity(output: &PathBuf, format: &str) -> Result<()> {
+    let config = ChatConfig2::load()?;
+
+    // Check identity exists
+    let identity = config
+        .identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Chat identity not initialized. Run 'anyhide chat init' first."))?;
+
+    // Get onion address
+    let onion = config
+        .my_onion
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Onion address not generated. Run 'anyhide chat init' first."))?;
+
+    // Load public keys
+    let enc_pub_path = PathBuf::from(format!("{}.pub", identity.key_path.display()));
+    let sign_pub_path = PathBuf::from(format!("{}.sign.pub", identity.sign_key_path.display()));
+
+    let enc_pubkey = load_public_key(&enc_pub_path)
+        .with_context(|| format!("Failed to load encryption public key from {}", enc_pub_path.display()))?;
+
+    let sign_pubkey = load_verifying_key(&sign_pub_path)
+        .with_context(|| format!("Failed to load signing public key from {}", sign_pub_path.display()))?;
+
+    // Encode to binary
+    let enc_pubkey_bytes: [u8; 32] = enc_pubkey.to_bytes();
+    let sign_pubkey_bytes: [u8; 32] = sign_pubkey.to_bytes();
+
+    let data = encode_chat_identity(onion, &enc_pubkey_bytes, &sign_pubkey_bytes, &identity.nickname)?;
+
+    // Generate QR code
+    let qr_format = match format.to_lowercase().as_str() {
+        "png" => QrFormat::Png,
+        "svg" => QrFormat::Svg,
+        "ascii" | "txt" => QrFormat::Ascii,
+        _ => bail!("Unknown QR format: {}. Use: png, svg, or ascii", format),
+    };
+
+    let qr_config = QrConfig {
+        format: qr_format,
+        ..Default::default()
+    };
+
+    generate_qr_to_file(&data, output, &qr_config)
+        .context("Failed to generate QR code")?;
+
+    println!("Chat identity QR exported to: {}", output.display());
+    println!();
+    println!("Identity info:");
+    println!("  Nickname: {}", identity.nickname);
+    println!("  Onion: {}", onion);
+    println!();
+    println!("Share this QR code with your contacts.");
+    println!("They can import it with: anyhide chat import-qr <image> -n <name>");
+
+    Ok(())
+}
+
+/// Import a chat contact from a QR code.
+fn import_qr_contact(image: &PathBuf, name: &str) -> Result<()> {
+    // Read QR code
+    let data = read_qr_from_file(image)
+        .with_context(|| format!("Failed to read QR code from {}", image.display()))?;
+
+    // Decode identity
+    let (onion, enc_pubkey, sign_pubkey, nickname) = decode_chat_identity(&data)
+        .context("Failed to decode chat identity from QR")?;
+
+    // Create temporary key files
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
+        .join("anyhide")
+        .join("contacts");
+
+    fs::create_dir_all(&config_dir)?;
+
+    // Save public keys
+    let enc_key_path = config_dir.join(format!("{}.pub", name));
+    let sign_key_path = config_dir.join(format!("{}.sign.pub", name));
+
+    // Write encryption public key as PEM
+    let enc_pem = format!(
+        "-----BEGIN ANYHIDE PUBLIC KEY-----\n{}\n-----END ANYHIDE PUBLIC KEY-----\n",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &enc_pubkey)
+    );
+    fs::write(&enc_key_path, &enc_pem)
+        .with_context(|| format!("Failed to write {}", enc_key_path.display()))?;
+
+    // Write signing public key as PEM
+    let sign_pem = format!(
+        "-----BEGIN ANYHIDE SIGNING PUBLIC KEY-----\n{}\n-----END ANYHIDE SIGNING PUBLIC KEY-----\n",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sign_pubkey)
+    );
+    fs::write(&sign_key_path, &sign_pem)
+        .with_context(|| format!("Failed to write {}", sign_key_path.display()))?;
+
+    // Add contact to config
+    let mut config = ChatConfig2::load()?;
+
+    if config.contacts.contains_key(name) {
+        bail!("Contact '{}' already exists. Remove it first with 'anyhide chat remove {}'", name, name);
+    }
+
+    config.contacts.insert(
+        name.to_string(),
+        ChatContact {
+            onion_address: onion.clone(),
+            public_key: enc_key_path.clone(),
+            signing_key: sign_key_path.clone(),
+        },
+    );
+
+    config.save()?;
+
+    println!("Contact '{}' imported from QR code.", name);
+    println!();
+    println!("Contact info:");
+    println!("  Original nickname: {}", nickname);
+    println!("  Onion address: {}", onion);
+    println!("  Encryption key: {}", enc_key_path.display());
+    println!("  Signing key: {}", sign_key_path.display());
+    println!();
+    println!("Start chatting with: anyhide chat {}", name);
+
+    Ok(())
+}
+
+/// Show your own chat identity.
+fn show_my_identity() -> Result<()> {
+    let config = ChatConfig2::load()?;
+
+    let identity = config
+        .identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Chat identity not initialized. Run 'anyhide chat init' first."))?;
+
+    println!("Your chat identity:");
+    println!();
+    println!("  Nickname: {}", identity.nickname);
+    if let Some(ref onion) = config.my_onion {
+        println!("  Onion address: {}", onion);
+    } else {
+        println!("  Onion address: (not generated yet)");
+    }
+    println!();
+    println!("  Encryption key: {}.key / {}.pub", identity.key_path.display(), identity.key_path.display());
+    println!("  Signing key: {}.sign.key / {}.sign.pub", identity.sign_key_path.display(), identity.sign_key_path.display());
+    println!();
+    println!("Share with contacts:");
+    if let Some(ref onion) = config.my_onion {
+        println!("  anyhide chat export-qr -o my-identity.png");
+        println!("  Or manually share: {} + public keys", onion);
+    } else {
+        println!("  Run 'anyhide chat init' first to generate your .onion address");
+    }
+
+    Ok(())
+}
+
+/// Load carriers from files for pre-shared mode.
+fn load_preshared_carriers(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
+    let mut carriers = Vec::with_capacity(paths.len());
+    for path in paths {
+        let data = std::fs::read(path)
+            .with_context(|| format!("Failed to read carrier file: {}", path.display()))?;
+        if data.len() < anyhide::chat::MIN_CARRIER_SIZE {
+            bail!(
+                "Carrier file too small: {} ({} bytes, minimum {} required)",
+                path.display(),
+                data.len(),
+                anyhide::chat::MIN_CARRIER_SIZE
+            );
+        }
+        carriers.push(data);
+    }
+    Ok(carriers)
+}
+
 /// Start a chat session with a contact.
-async fn start_chat(contact_name: &str, _carriers_count: usize, _carrier_size: usize, profile: Option<&str>) -> Result<()> {
+async fn start_chat(
+    contact_name: &str,
+    carriers_count: usize,
+    carrier_size: usize,
+    carrier_files: Option<&[PathBuf]>,
+    profile: Option<&str>,
+) -> Result<()> {
     // Load configuration
     let config = ChatConfig2::load()?;
 
@@ -511,6 +843,20 @@ async fn start_chat(contact_name: &str, _carriers_count: usize, _carrier_size: u
     // Prepare peer address
     let peer_addr = format!("{}:{}", contact.onion_address, CHAT_PORT);
 
+    // Load pre-shared carriers if specified
+    let (preshared_carriers, chat_config) = if let Some(paths) = carrier_files {
+        println!("Loading {} pre-shared carrier file(s)...", paths.len());
+        let carriers = load_preshared_carriers(paths)?;
+        let hash = hash_carriers(&carriers);
+        println!("Carrier hash: {}", hex::encode(&hash[..8]));
+        (Some(carriers), ChatConfig::with_preshared_carriers(hash))
+    } else {
+        let mut config = ChatConfig::default();
+        config.carriers_per_party = carriers_count;
+        config.carrier_size = carrier_size;
+        (None, config)
+    };
+
     // Connection + handshake loop with retries (Tor can be flaky)
     let (mut session, mut conn) = loop {
         println!("Looking for {}...", contact_name);
@@ -558,9 +904,6 @@ async fn start_chat(contact_name: &str, _carriers_count: usize, _carrier_size: u
         let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let my_eph_public = PublicKey::from(&my_eph_secret);
 
-        // Create config (256 char limit for steganographic efficiency)
-        let chat_config = ChatConfig::default();
-
         // Perform handshake based on role
         println!("Performing handshake...");
         let handshake_result = if is_initiator {
@@ -570,7 +913,8 @@ async fn start_chat(contact_name: &str, _carriers_count: usize, _carrier_size: u
                 my_eph_public,
                 &my_signing_keypair,
                 their_verifying_key.clone(),
-                chat_config,
+                chat_config.clone(),
+                preshared_carriers.as_deref(),
                 &passphrase,
             )
             .await
@@ -581,7 +925,8 @@ async fn start_chat(contact_name: &str, _carriers_count: usize, _carrier_size: u
                 my_eph_public,
                 &my_signing_keypair,
                 their_verifying_key.clone(),
-                chat_config,
+                chat_config.clone(),
+                preshared_carriers.as_deref(),
                 &passphrase,
             )
             .await
@@ -610,6 +955,7 @@ async fn perform_initiator_handshake<T: MessageTransport>(
     my_signing_keypair: &SigningKeyPair,
     their_verifying_key: ed25519_dalek::VerifyingKey,
     config: ChatConfig,
+    preshared_carriers: Option<&[Vec<u8>]>,
     user_passphrase: &str,
 ) -> Result<ChatSession> {
     // Create and sign init
@@ -650,40 +996,69 @@ async fn perform_initiator_handshake<T: MessageTransport>(
     // Get their ephemeral public key
     let their_eph_public = PublicKey::from(response.ephemeral_public);
 
-    // Derive carrier encryption key
-    let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-    let mut carrier_enc_key = [0u8; 32];
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-    hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-        .expect("32 bytes is valid");
+    // Negotiate config
+    let agreed_config = config.negotiate(&response.config)
+        .context("Carrier mode mismatch - both parties must use same mode (random or pre-shared with matching files)")?;
 
-    // Decrypt their carriers
-    let their_carriers = decrypt_carriers(&response.encrypted_carriers, &carrier_enc_key)
-        .context("Failed to decrypt peer carriers")?;
+    // Handle carriers based on mode
+    let (my_carriers, their_carriers) = if agreed_config.is_preshared() {
+        // Pre-shared mode: use the same carriers for both parties
+        let carriers = preshared_carriers
+            .ok_or_else(|| anyhow::anyhow!("Pre-shared carriers required but not provided"))?
+            .to_vec();
 
-    // Generate and encrypt our carriers
-    let agreed_config = config.negotiate(&response.config);
-    let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-    let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
-        .context("Failed to encrypt carriers")?;
+        // In pre-shared mode, both parties use the same carriers
+        // We still need to send a complete message for protocol consistency
+        let carrier_hash = hash_carriers(&carriers);
+        let complete_signature = my_signing_keypair.sign(&carrier_hash);
+        let complete = HandshakeComplete::new(vec![], complete_signature.to_vec());
 
-    // Sign complete
-    let carrier_hash = hash_carriers(&my_carriers);
-    let complete_signature = my_signing_keypair.sign(&carrier_hash);
+        let complete_bytes = complete.to_bytes()?;
+        let complete_wire = WireMessage::new(
+            1,
+            [0u8; 12],
+            vec![],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
+        );
+        conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
 
-    let complete = HandshakeComplete::new(encrypted_carriers, complete_signature.to_vec());
+        (carriers.clone(), carriers)
+    } else {
+        // Random mode: exchange carriers
+        let mut carrier_enc_key = [0u8; 32];
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
+        let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
+        hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
+            .expect("32 bytes is valid");
 
-    // Send complete
-    let complete_bytes = complete.to_bytes()?;
-    let complete_wire = WireMessage::new(
-        1,
-        [0u8; 12],
-        vec![],
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
-    );
-    conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
+        // Decrypt their carriers
+        let their_carriers = decrypt_carriers(&response.encrypted_carriers, &carrier_enc_key)
+            .context("Failed to decrypt peer carriers")?;
+
+        // Generate and encrypt our carriers
+        let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+        let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+            .context("Failed to encrypt carriers")?;
+
+        // Sign complete
+        let carrier_hash = hash_carriers(&my_carriers);
+        let complete_signature = my_signing_keypair.sign(&carrier_hash);
+        let complete = HandshakeComplete::new(encrypted_carriers, complete_signature.to_vec());
+
+        // Send complete
+        let complete_bytes = complete.to_bytes()?;
+        let complete_wire = WireMessage::new(
+            1,
+            [0u8; 12],
+            vec![],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
+        );
+        conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
+
+        (my_carriers, their_carriers)
+    };
 
     // Create session (we are initiator)
     ChatSession::init_as_initiator(
@@ -707,6 +1082,7 @@ async fn perform_responder_handshake<T: MessageTransport>(
     my_signing_keypair: &SigningKeyPair,
     their_verifying_key: ed25519_dalek::VerifyingKey,
     proposed_config: ChatConfig,
+    preshared_carriers: Option<&[Vec<u8>]>,
     user_passphrase: &str,
 ) -> Result<ChatSession> {
     // Receive HandshakeInit
@@ -726,66 +1102,114 @@ async fn perform_responder_handshake<T: MessageTransport>(
         .context("Handshake signature verification failed")?;
 
     // Negotiate config
-    let agreed_config = proposed_config.negotiate(&init.config);
+    let agreed_config = proposed_config.negotiate(&init.config)
+        .context("Carrier mode mismatch - both parties must use same mode (random or pre-shared with matching files)")?;
 
-    // Generate carriers
-    let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-
-    // Derive carrier encryption key
     let their_eph_public = PublicKey::from(init.ephemeral_public);
-    let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-    let mut carrier_enc_key = [0u8; 32];
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-    hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-        .expect("32 bytes is valid");
 
-    // Encrypt our carriers
-    let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
-        .context("Failed to encrypt carriers")?;
+    // Handle carriers based on mode
+    let (my_carriers, their_carriers) = if agreed_config.is_preshared() {
+        // Pre-shared mode: use the same carriers for both parties
+        let carriers = preshared_carriers
+            .ok_or_else(|| anyhow::anyhow!("Pre-shared carriers required but not provided"))?
+            .to_vec();
 
-    // Create and sign response
-    let carrier_hash = hash_carriers(&my_carriers);
-    let response_data = {
-        let mut data = Vec::new();
-        data.push(1u8); // version
-        data.extend_from_slice(my_eph_public.as_bytes());
-        data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-        data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
-        data.extend_from_slice(&carrier_hash);
-        data
+        // Sign response with carrier hash
+        let carrier_hash = hash_carriers(&carriers);
+        let response_data = {
+            let mut data = Vec::new();
+            data.push(1u8); // version
+            data.extend_from_slice(my_eph_public.as_bytes());
+            data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
+            data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
+            data.extend_from_slice(&carrier_hash);
+            data
+        };
+        let response_signature = my_signing_keypair.sign(&response_data);
+
+        // Send response (empty encrypted_carriers in preshared mode)
+        let response = HandshakeResponse::new(
+            *my_eph_public.as_bytes(),
+            my_signing_keypair.verifying_key().to_bytes(),
+            agreed_config.clone(),
+            vec![],
+            response_signature.to_vec(),
+        );
+
+        let response_bytes = response.to_bytes()?;
+        let response_wire = WireMessage::new(
+            1,
+            [0u8; 12],
+            vec![],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
+        );
+        conn.send(&response_wire).await.context("Failed to send handshake response")?;
+
+        // Receive HandshakeComplete (for protocol consistency)
+        let _complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
+
+        (carriers.clone(), carriers)
+    } else {
+        // Random mode: generate and exchange carriers
+        let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+
+        // Derive carrier encryption key
+        let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
+        let mut carrier_enc_key = [0u8; 32];
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
+        hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
+            .expect("32 bytes is valid");
+
+        // Encrypt our carriers
+        let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+            .context("Failed to encrypt carriers")?;
+
+        // Create and sign response
+        let carrier_hash = hash_carriers(&my_carriers);
+        let response_data = {
+            let mut data = Vec::new();
+            data.push(1u8); // version
+            data.extend_from_slice(my_eph_public.as_bytes());
+            data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
+            data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
+            data.extend_from_slice(&carrier_hash);
+            data
+        };
+        let response_signature = my_signing_keypair.sign(&response_data);
+
+        let response = HandshakeResponse::new(
+            *my_eph_public.as_bytes(),
+            my_signing_keypair.verifying_key().to_bytes(),
+            agreed_config.clone(),
+            encrypted_carriers,
+            response_signature.to_vec(),
+        );
+
+        // Send response
+        let response_bytes = response.to_bytes()?;
+        let response_wire = WireMessage::new(
+            1,
+            [0u8; 12],
+            vec![],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
+        );
+        conn.send(&response_wire).await.context("Failed to send handshake response")?;
+
+        // Receive HandshakeComplete
+        let complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
+        let complete_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &complete_wire.anyhide_code)
+            .context("Failed to decode handshake complete")?;
+        let complete = HandshakeComplete::from_bytes(&complete_bytes)
+            .context("Failed to parse handshake complete")?;
+
+        // Decrypt their carriers
+        let their_carriers = decrypt_carriers(&complete.encrypted_carriers, &carrier_enc_key)
+            .context("Failed to decrypt peer carriers")?;
+
+        (my_carriers, their_carriers)
     };
-    let response_signature = my_signing_keypair.sign(&response_data);
-
-    let response = HandshakeResponse::new(
-        *my_eph_public.as_bytes(),
-        my_signing_keypair.verifying_key().to_bytes(),
-        agreed_config.clone(),
-        encrypted_carriers,
-        response_signature.to_vec(),
-    );
-
-    // Send response
-    let response_bytes = response.to_bytes()?;
-    let response_wire = WireMessage::new(
-        1,
-        [0u8; 12],
-        vec![],
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
-    );
-    conn.send(&response_wire).await.context("Failed to send handshake response")?;
-
-    // Receive HandshakeComplete
-    let complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
-    let complete_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &complete_wire.anyhide_code)
-        .context("Failed to decode handshake complete")?;
-    let complete = HandshakeComplete::from_bytes(&complete_bytes)
-        .context("Failed to parse handshake complete")?;
-
-    // Decrypt their carriers
-    let their_carriers = decrypt_carriers(&complete.encrypted_carriers, &carrier_enc_key)
-        .context("Failed to decrypt peer carriers")?;
 
     // Create session (we are responder)
     ChatSession::init_as_responder(
@@ -948,5 +1372,119 @@ async fn run_tui_loop<T: MessageTransport>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Onion v3 addresses are exactly 56 characters (without .onion suffix)
+    // Format: base32(ed25519_pubkey || checksum || version) = 56 chars
+    const TEST_ONION: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+
+    #[test]
+    fn test_encode_decode_chat_identity_roundtrip() {
+        let enc_pubkey = [1u8; 32];
+        let sign_pubkey = [2u8; 32];
+        let nickname = "alice";
+
+        let data = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, nickname).unwrap();
+
+        let (decoded_onion, decoded_enc, decoded_sign, decoded_nick) =
+            decode_chat_identity(&data).unwrap();
+
+        assert_eq!(decoded_onion, TEST_ONION);
+        assert_eq!(decoded_enc, enc_pubkey);
+        assert_eq!(decoded_sign, sign_pubkey);
+        assert_eq!(decoded_nick, nickname);
+    }
+
+    #[test]
+    fn test_encode_decode_empty_nickname() {
+        let enc_pubkey = [0xAA; 32];
+        let sign_pubkey = [0xBB; 32];
+        let nickname = "";
+
+        let data = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, nickname).unwrap();
+
+        let (decoded_onion, decoded_enc, decoded_sign, decoded_nick) =
+            decode_chat_identity(&data).unwrap();
+
+        assert_eq!(decoded_onion, TEST_ONION);
+        assert_eq!(decoded_enc, enc_pubkey);
+        assert_eq!(decoded_sign, sign_pubkey);
+        assert_eq!(decoded_nick, "");
+    }
+
+    #[test]
+    fn test_encode_decode_long_nickname() {
+        let enc_pubkey = [0xCC; 32];
+        let sign_pubkey = [0xDD; 32];
+        let nickname = "a".repeat(63); // Max length
+
+        let data = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, &nickname).unwrap();
+
+        let (_, _, _, decoded_nick) = decode_chat_identity(&data).unwrap();
+
+        assert_eq!(decoded_nick, nickname);
+    }
+
+    #[test]
+    fn test_encode_nickname_too_long() {
+        let enc_pubkey = [0; 32];
+        let sign_pubkey = [0; 32];
+        let nickname = "a".repeat(64); // Too long
+
+        let result = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, &nickname);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_invalid_magic() {
+        let data = b"XXXX\x01abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\x05alice";
+        let result = decode_chat_identity(data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("wrong magic"));
+    }
+
+    #[test]
+    fn test_decode_invalid_version() {
+        let mut data = vec![];
+        data.extend_from_slice(CHAT_QR_MAGIC);
+        data.push(0xFF); // Invalid version
+        data.extend_from_slice(&[0u8; 56]); // onion
+        data.extend_from_slice(&[0u8; 32]); // enc key
+        data.extend_from_slice(&[0u8; 32]); // sign key
+        data.push(0); // nick len
+
+        let result = decode_chat_identity(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported QR version"));
+    }
+
+    #[test]
+    fn test_decode_too_short() {
+        let data = b"AHID\x01short";
+        let result = decode_chat_identity(data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[test]
+    fn test_chat_qr_format_size() {
+        // Verify the format fits in QR code capacity
+        let enc_pubkey = [0xDE; 32];
+        let sign_pubkey = [0xAD; 32];
+        let nickname = "maximum-length-nickname-that-is-quite-long";
+
+        let data = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, nickname).unwrap();
+
+        // Format: magic(4) + version(1) + onion(56) + enc(32) + sign(32) + nick_len(1) + nick
+        let expected_size = 4 + 1 + 56 + 32 + 32 + 1 + nickname.len();
+        assert_eq!(data.len(), expected_size);
+
+        // Should fit easily in QR Version 10 (capacity ~914 bytes in binary mode L)
+        assert!(data.len() < 900);
     }
 }

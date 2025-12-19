@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2025-12-19
+
+### Added
+
+- **Multi-Carrier Encoding**
+  - Use multiple carriers concatenated in order: `-c file1 -c file2 -c file3`
+  - Order matters! Different order = different carrier = garbage on decode
+  - Provides N! additional security combinations (2 carriers = 2, 3 = 6, 4 = 24, 5 = 120)
+  - Single carrier backwards compatible (preserves text vs binary detection)
+  - Multiple carriers are always read as bytes and concatenated
+
+```bash
+# Encode with multiple carriers
+anyhide encode -c photo.jpg -c song.mp3 -c doc.pdf -m "secret" -p "pass" --their-key bob.pub
+
+# Decode with EXACT same order
+anyhide decode -c photo.jpg -c song.mp3 -c doc.pdf --code "..." -p "pass" --my-key bob.key
+
+# Wrong order = garbage (plausible deniability maintained)
+anyhide decode -c song.mp3 -c photo.jpg -c doc.pdf --code "..." -p "pass" --my-key bob.key
+```
+
+- **Chat Identity QR Code**
+  - Share chat identity via QR code for easy contact exchange
+  - `anyhide chat export-qr -o identity.png` - Generate QR with your onion address and keys
+  - `anyhide chat import-qr identity.png -n alice` - Scan QR and add contact
+  - Compact binary format (~170 bytes): magic + version + onion(56) + enc_key(32) + sign_key(32) + nickname
+  - Supports PNG, JPEG, GIF, BMP output formats
+  - `anyhide chat me` - Display your own identity info
+
+- **Pre-shared Carriers for Chat**
+  - Optional: Use pre-shared carrier files instead of random carriers
+  - `anyhide chat bob -c photo.jpg -c song.mp3` - Both parties must use same files in same order
+  - Carrier files are NEVER transmitted over the network - only hash is verified
+  - Files become an additional secret factor (N files = N! combinations)
+  - `CarrierMode` enum: `Random` (default) vs `PreShared { hash }`
+  - Hash mismatch between parties produces clear error message
+
+### Changed
+
+- CLI argument `-c`/`--carrier` now accepts multiple values
+- `Carrier::from_files()` method added for library users
+
 ## [0.11.1] - 2025-12-18
 
 ### Fixed

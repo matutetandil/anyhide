@@ -1126,3 +1126,230 @@ fn test_chat_forward_secrecy() {
     let final_msg = bob.receive_message(&final_wire).unwrap();
     assert_eq!(final_msg, "Final message");
 }
+
+// =============================================================================
+// Multi-Carrier Tests
+// =============================================================================
+
+/// Helper to normalize whitespace for comparison
+fn normalize_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Test multi-carrier encode/decode with same order
+#[test]
+fn test_multi_carrier_same_order() {
+    use anyhide::{encode_with_carrier_config, decode_with_carrier_config, EncoderConfig, DecoderConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create carrier files with different content
+    let carrier1_path = dir.path().join("carrier1.bin");
+    let carrier2_path = dir.path().join("carrier2.bin");
+    let carrier3_path = dir.path().join("carrier3.bin");
+
+    // Create carriers with all byte values for maximum coverage
+    let mut data1 = Vec::new();
+    for i in 0..=255u8 { data1.push(i); }
+    let mut data2 = Vec::new();
+    for i in (0..=255u8).rev() { data2.push(i); }
+    let mut data3 = Vec::new();
+    for i in 0..=255u8 { data3.push(i.wrapping_add(128)); }
+
+    std::fs::write(&carrier1_path, &data1).unwrap();
+    std::fs::write(&carrier2_path, &data2).unwrap();
+    std::fs::write(&carrier3_path, &data3).unwrap();
+
+    let paths = vec![carrier1_path, carrier2_path, carrier3_path];
+    let message = "secret message";
+    let passphrase = "multi-carrier-test";
+
+    let keypair = KeyPair::generate();
+
+    // Load multi-carrier
+    let carrier = Carrier::from_files(&paths).unwrap();
+    assert!(carrier.is_binary());
+    assert_eq!(carrier.len(), 256 * 3); // 768 bytes total
+
+    // Encode
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: false,
+        decoy: None,
+    };
+
+    let encoded = encode_with_carrier_config(&carrier, message, passphrase, keypair.public_key(), &config).unwrap();
+    assert!(!encoded.code.is_empty());
+
+    // Decode with same order
+    let carrier_decode = Carrier::from_files(&paths).unwrap();
+    let decode_config = DecoderConfig {
+        verbose: false,
+        verifying_key: None,
+    };
+
+    let decoded = decode_with_carrier_config(&encoded.code, &carrier_decode, passphrase, keypair.secret_key(), &decode_config);
+    // Normalize whitespace for comparison (message reconstruction may add extra spaces)
+    assert_eq!(normalize_whitespace(&decoded.message), normalize_whitespace(message));
+}
+
+/// Test multi-carrier wrong order produces garbage (plausible deniability)
+#[test]
+fn test_multi_carrier_wrong_order_produces_garbage() {
+    use anyhide::{encode_with_carrier_config, decode_with_carrier_config, EncoderConfig, DecoderConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create carrier files
+    let carrier1_path = dir.path().join("first.bin");
+    let carrier2_path = dir.path().join("second.bin");
+
+    // Create carriers with all byte values
+    let mut data1 = Vec::new();
+    for i in 0..=255u8 { data1.push(i); }
+    let mut data2 = Vec::new();
+    for i in (0..=255u8).rev() { data2.push(i); }
+
+    std::fs::write(&carrier1_path, &data1).unwrap();
+    std::fs::write(&carrier2_path, &data2).unwrap();
+
+    let correct_order = vec![carrier1_path.clone(), carrier2_path.clone()];
+    let wrong_order = vec![carrier2_path, carrier1_path];
+
+    let message = "correct message";
+    let passphrase = "order-test";
+
+    let keypair = KeyPair::generate();
+
+    // Encode with correct order
+    let carrier_encode = Carrier::from_files(&correct_order).unwrap();
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: false,
+        decoy: None,
+    };
+
+    let encoded = encode_with_carrier_config(&carrier_encode, message, passphrase, keypair.public_key(), &config).unwrap();
+
+    // Decode with correct order - should work
+    let carrier_correct = Carrier::from_files(&correct_order).unwrap();
+    let decode_config = DecoderConfig {
+        verbose: false,
+        verifying_key: None,
+    };
+    let decoded_correct = decode_with_carrier_config(&encoded.code, &carrier_correct, passphrase, keypair.secret_key(), &decode_config);
+    assert_eq!(normalize_whitespace(&decoded_correct.message), normalize_whitespace(message));
+
+    // Decode with wrong order - should produce garbage
+    let carrier_wrong = Carrier::from_files(&wrong_order).unwrap();
+    let decoded_wrong = decode_with_carrier_config(&encoded.code, &carrier_wrong, passphrase, keypair.secret_key(), &decode_config);
+
+    // Messages should be different (wrong order = garbage)
+    assert_ne!(normalize_whitespace(&decoded_wrong.message), normalize_whitespace(message));
+}
+
+/// Test single carrier backwards compatibility
+#[test]
+fn test_single_carrier_backwards_compatible() {
+    use anyhide::{encode_with_carrier_config, decode_with_carrier_config, EncoderConfig, DecoderConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let carrier_path = dir.path().join("carrier.txt");
+    std::fs::write(&carrier_path, "This is a test carrier with various words").unwrap();
+
+    let paths = vec![carrier_path.clone()];
+    let message = "test";
+    let passphrase = "single-carrier";
+
+    let keypair = KeyPair::generate();
+
+    // Load single carrier via from_files (should delegate to from_file)
+    let carrier = Carrier::from_files(&paths).unwrap();
+    assert!(!carrier.is_binary()); // Single .txt should be text carrier
+
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: false,
+        decoy: None,
+    };
+
+    let encoded = encode_with_carrier_config(&carrier, message, passphrase, keypair.public_key(), &config).unwrap();
+
+    // Decode
+    let carrier_decode = Carrier::from_files(&paths).unwrap();
+    let decode_config = DecoderConfig {
+        verbose: false,
+        verifying_key: None,
+    };
+
+    let decoded = decode_with_carrier_config(&encoded.code, &carrier_decode, passphrase, keypair.secret_key(), &decode_config);
+    assert_eq!(decoded.message.to_lowercase(), message.to_lowercase());
+}
+
+/// Test multi-carrier with 3 files - all permutations except correct produce garbage
+#[test]
+fn test_multi_carrier_permutation_security() {
+    use anyhide::{encode_with_carrier_config, decode_with_carrier_config, EncoderConfig, DecoderConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create 3 carrier files
+    let paths: Vec<_> = (0..3).map(|i| {
+        let path = dir.path().join(format!("c{}.bin", i));
+        let mut data = Vec::new();
+        for j in 0..=255u8 { data.push(j.wrapping_add(i as u8 * 50)); }
+        std::fs::write(&path, &data).unwrap();
+        path
+    }).collect();
+
+    let message = "secure";
+    let passphrase = "permutation-test";
+
+    let keypair = KeyPair::generate();
+
+    // Encode with correct order [0, 1, 2]
+    let correct_order = paths.clone();
+    let carrier_encode = Carrier::from_files(&correct_order).unwrap();
+    let config = EncoderConfig {
+        verbose: false,
+        signing_key: None,
+        min_coverage: 1.0,
+        expires_at: None,
+        ratchet: false,
+        decoy: None,
+    };
+
+    let encoded = encode_with_carrier_config(&carrier_encode, message, passphrase, keypair.public_key(), &config).unwrap();
+
+    let decode_config = DecoderConfig {
+        verbose: false,
+        verifying_key: None,
+    };
+
+    // Test correct order works
+    let carrier_correct = Carrier::from_files(&correct_order).unwrap();
+    let decoded = decode_with_carrier_config(&encoded.code, &carrier_correct, passphrase, keypair.secret_key(), &decode_config);
+    assert_eq!(normalize_whitespace(&decoded.message), normalize_whitespace(message));
+
+    // Test some wrong permutations produce garbage
+    let wrong_orders = vec![
+        vec![paths[0].clone(), paths[2].clone(), paths[1].clone()], // [0, 2, 1]
+        vec![paths[1].clone(), paths[0].clone(), paths[2].clone()], // [1, 0, 2]
+        vec![paths[2].clone(), paths[1].clone(), paths[0].clone()], // [2, 1, 0]
+    ];
+
+    for wrong_order in wrong_orders {
+        let carrier_wrong = Carrier::from_files(&wrong_order).unwrap();
+        let decoded_wrong = decode_with_carrier_config(&encoded.code, &carrier_wrong, passphrase, keypair.secret_key(), &decode_config);
+        assert_ne!(normalize_whitespace(&decoded_wrong.message), normalize_whitespace(message), "Wrong order should produce garbage");
+    }
+}

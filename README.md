@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 [![GitHub Release](https://img.shields.io/github/v/release/matutetandil/anyhide)](https://github.com/matutetandil/anyhide/releases)
 
-**Hide anything inside anything.** Anyhide is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
+**Hide anything inside anything.** Anyhide is an advanced steganography and encryption tool that conceals any data (text, files, binaries) within any carrier file(s) (images, videos, documents, executables) using hybrid encryption with forward secrecy and plausible deniability.
 
 ## Why Anyhide?
 
@@ -165,10 +165,11 @@ anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
 ### Encode
 
 ```bash
-anyhide encode [OPTIONS] -c <CARRIER> -p <PASSPHRASE>
+anyhide encode [OPTIONS] -c <CARRIER>... -p <PASSPHRASE>
 
 Options:
-  -c, --carrier <PATH>     Carrier file (any file type)
+  -c, --carriers <PATH>... Carrier file(s) - multiple files are concatenated.
+                           Order matters! Wrong order = garbage (N! combinations)
   -m, --message <TEXT>     Text message (or use --file for binary)
   -f, --file <PATH>        Binary file to hide
   -p, --passphrase <PASS>  Passphrase for encryption
@@ -203,7 +204,7 @@ Other options:
 ### Decode
 
 ```bash
-anyhide decode [OPTIONS] -c <CARRIER> -p <PASSPHRASE>
+anyhide decode [OPTIONS] -c <CARRIER>... -p <PASSPHRASE>
 
 Code input (choose one):
   --code <TEXT>            Direct base64 code
@@ -212,7 +213,7 @@ Code input (choose one):
   --parts <FILES>...       Combine split parts (2-10 files)
 
 Options:
-  -c, --carrier <PATH>     Carrier file (same as encoding)
+  -c, --carriers <PATH>... Carrier file(s) - EXACT same files in EXACT same order!
   -p, --passphrase <PASS>  Passphrase for decryption
 
 Key options (choose one):
@@ -356,6 +357,16 @@ anyhide chat bob
 # Enter your passphrase when prompted (input is hidden)
 ```
 
+**Pre-shared carriers (optional, extra security):**
+```bash
+# Both parties must use the SAME files in the SAME order
+anyhide chat bob -c photo.jpg -c song.mp3 -c document.pdf
+
+# The carrier files are NEVER transmitted - only a hash is verified
+# This provides extra security: the files become an additional secret
+# N files = N! additional security (3 files = 6 possible orders)
+```
+
 That's it! The system will:
 1. Ask for your passphrase (required for encryption, input is hidden)
 2. Create your hidden service
@@ -390,6 +401,8 @@ anyhide chat list                       # List contacts
 anyhide chat show <name>                # Show contact details
 anyhide chat show me                    # Show your own identity and .onion
 anyhide chat remove <name>              # Remove a contact
+anyhide chat export-qr -o me.png        # Export your identity as QR code
+anyhide chat import-qr me.png -n alice  # Import contact from QR code
 ```
 
 **Local testing with profiles:**
@@ -422,11 +435,12 @@ Each profile gets separate config and Tor state directories.
 
 **How it works:**
 1. Both parties initialize with `chat init` (creates their .onion identity)
-2. Exchange .onion addresses and public keys out-of-band
-3. Add each other with `chat add`
-4. Run `anyhide chat <contact>` - both peers create hidden services and race to connect
-5. First successful connection wins, handshake establishes encrypted session
-6. Messages encrypted with Double Ratchet protocol for forward secrecy
+2. Exchange identities out-of-band:
+   - **Option A (QR):** `chat export-qr` to generate QR, scan with `chat import-qr`
+   - **Option B (Manual):** Share .onion address and public keys, use `chat add`
+3. Run `anyhide chat <contact>` - both peers create hidden services and race to connect
+4. First successful connection wins, handshake establishes encrypted session
+5. Messages encrypted with Double Ratchet protocol for forward secrecy
 
 ### Other Commands
 
@@ -503,6 +517,36 @@ anyhide decode --code-qr code.png -c carrier.txt -p "pass" -k bob.key
 anyhide encode -c carrier.txt -m "Secret" -p "pass" -k bob.pub --split 3 --qr code.png
 # Creates: code-1.png, code-2.png, code-3.png
 ```
+
+### Multi-Carrier Encoding
+
+Use multiple carriers concatenated in order. The order is an additional secret!
+
+```bash
+# Encode with 3 carriers - order matters!
+anyhide encode -c photo.jpg -c song.mp3 -c document.pdf \
+  -m "Secret message" -p "pass" --their-key bob.pub
+
+# Decode with EXACT same files in EXACT same order
+anyhide decode -c photo.jpg -c song.mp3 -c document.pdf \
+  --code "..." -p "pass" --my-key bob.key
+
+# Wrong order = garbage (plausible deniability)
+anyhide decode -c song.mp3 -c photo.jpg -c document.pdf \
+  --code "..." -p "pass" --my-key bob.key
+# Returns garbage, not an error
+```
+
+**Security benefit:** N carriers provide N! additional combinations:
+- 2 carriers = 2 combinations
+- 3 carriers = 6 combinations
+- 4 carriers = 24 combinations
+- 5 carriers = 120 combinations
+
+When using multiple carriers:
+- All files are read as bytes and concatenated in order
+- Single text file with `-c file.txt` preserves text carrier behavior
+- Multiple files always become a binary carrier
 
 ### Forward Secrecy Ratchet
 

@@ -1,8 +1,8 @@
 [package]
 name = "anyhide"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2021"
-description = "Hide any data in any file - steganography tool with hybrid encryption and plausible deniability"
+description = "Hide any data in any file(s) - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"
 authors = ["Anyhide Contributors"]
 repository = "https://github.com/matutetandil/anyhide"

@@ -22,6 +22,10 @@ use super::CommandExecutor;
 /// NOTE: This command NEVER fails - it returns garbage if inputs are wrong.
 /// This provides plausible deniability.
 ///
+/// Multiple carriers can be provided with -c file1 -c file2 -c file3.
+/// They MUST be the EXACT same files in the EXACT same order as encoding.
+/// Wrong order = garbage (plausible deniability, N! combinations).
+///
 /// Use -o/--output to write raw bytes to a file (required for binary data).
 /// Without -o, output is printed as text (lossy UTF-8 conversion).
 ///
@@ -49,9 +53,10 @@ pub struct DecodeCommand {
     #[arg(long, num_args = 2..=10, conflicts_with_all = ["code", "code_qr", "code_file"])]
     pub parts: Option<Vec<PathBuf>>,
 
-    /// Path to carrier file (must be the EXACT same file used for encoding)
-    #[arg(short, long)]
-    pub carrier: PathBuf,
+    /// Path to carrier file(s). Must be EXACT same files in EXACT same order as encoding!
+    /// Multiple -c flags concatenate carriers. Wrong order = garbage (N! combinations).
+    #[arg(short, long, required = true, num_args = 1..)]
+    pub carriers: Vec<PathBuf>,
 
     /// Passphrase for decryption (must match encoding passphrase)
     #[arg(short, long)]
@@ -153,18 +158,28 @@ impl DecodeCommand {
             return;
         };
 
-        // Load carrier with auto-detection based on file extension
-        let carrier = match Carrier::from_file(&self.carrier) {
+        // Load carrier(s) - multiple carriers are concatenated in order
+        let carrier = match Carrier::from_files(&self.carriers) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Warning: Could not read carrier file: {}", e);
-                Carrier::from_text("")
+                let paths: Vec<_> = self.carriers.iter().map(|p| p.display().to_string()).collect();
+                eprintln!("Warning: Could not read carrier file(s) {}: {}", paths.join(", "), e);
+                Carrier::from_bytes(vec![]) // Empty carrier for plausible deniability
             }
         };
 
         let carrier_type = if carrier.is_binary() { "binary" } else { "text" };
         if self.verbose {
-            eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
+            if self.carriers.len() > 1 {
+                eprintln!(
+                    "Loaded {} carriers concatenated as {} ({} units total)",
+                    self.carriers.len(),
+                    carrier_type,
+                    carrier.len()
+                );
+            } else {
+                eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
+            }
         }
 
         // Resolve private key from various sources

@@ -24,13 +24,18 @@ use super::CommandExecutor;
 /// - Text files (.txt, .md, .csv, .json, .xml, .html) - substring matching
 /// - Any other file (images, audio, video, PDFs, executables, etc.) - byte-sequence matching
 ///
+/// Multiple carriers can be concatenated with -c file1 -c file2 -c file3.
+/// Order matters! Different order = different carrier = garbage on decode.
+/// This provides N! additional security combinations for N carriers.
+///
 /// Output is always an encrypted code (base64) - the carrier is NEVER modified.
 /// The code does NOT reveal whether the hidden data is text or binary.
 #[derive(Args, Debug)]
 pub struct EncodeCommand {
-    /// Path to carrier file (any file - text uses substring matching, others use byte matching)
-    #[arg(short, long)]
-    pub carrier: PathBuf,
+    /// Path to carrier file(s). Multiple -c flags concatenate carriers in ORDER.
+    /// Order is a secret! Different order = garbage on decode (N! combinations).
+    #[arg(short, long, required = true, num_args = 1..)]
+    pub carriers: Vec<PathBuf>,
 
     /// Text message to encode (mutually exclusive with --file)
     #[arg(short, long, conflicts_with = "file")]
@@ -141,13 +146,25 @@ pub struct EncodeCommand {
 
 impl CommandExecutor for EncodeCommand {
     fn execute(&self) -> Result<()> {
-        // Load carrier with auto-detection based on file extension
-        let carrier = Carrier::from_file(&self.carrier)
-            .with_context(|| format!("Failed to read carrier from {}", self.carrier.display()))?;
+        // Load carrier(s) - multiple carriers are concatenated in order
+        let carrier = Carrier::from_files(&self.carriers)
+            .with_context(|| {
+                let paths: Vec<_> = self.carriers.iter().map(|p| p.display().to_string()).collect();
+                format!("Failed to read carrier(s) from: {}", paths.join(", "))
+            })?;
 
         let carrier_type = if carrier.is_binary() { "binary" } else { "text" };
         if self.verbose {
-            eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
+            if self.carriers.len() > 1 {
+                eprintln!(
+                    "Loaded {} carriers concatenated as {} ({} units total)",
+                    self.carriers.len(),
+                    carrier_type,
+                    carrier.len()
+                );
+            } else {
+                eprintln!("Loaded {} carrier ({} units)", carrier_type, carrier.len());
+            }
         }
 
         // Resolve recipient's public key from various sources
