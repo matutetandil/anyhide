@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2025-12-19
+
+### Added
+
+- **Ephemeral Chat Contacts**
+  - Chat without saving contact to config file
+  - `anyhide chat -e --onion <addr> --pubkey <hex> --sign-key <hex>` - Inline keys
+  - `anyhide chat -e --from-qr <image>` - Import from QR code
+  - Contact appears as `~ephemeral` in TUI
+  - Ideal for one-time conversations or maximum privacy
+  - Same security features as regular chat (Double Ratchet, Tor, etc.)
+
+### Fixed
+
+- **Security: Complete zeroization of chat session keys on drop**
+  - All sensitive key material is now properly zeroized when session ends
+  - Affects: `send_chain`, `recv_chain`, `carrier_chain`, `my_dh_secret`,
+    `user_passphrase`, `derived_passphrase`, `my_signing_key`
+  - Note: Messages and session keys are NEVER written to disk in ANY chat mode
+  - The only difference between normal and ephemeral chat is whether the
+    contact identity is saved to `chat.toml`
+
+```bash
+# Ephemeral chat with inline keys
+anyhide chat -e \
+  --onion xyz123abc.onion \
+  --pubkey 0101010101010101010101010101010101010101010101010101010101010101 \
+  --sign-key 0202020202020202020202020202020202020202020202020202020202020202
+
+# Ephemeral chat from QR code
+anyhide chat -e --from-qr contact_qr.png
+```
+
 ## [0.12.0] - 2025-12-19
 
 ### Added

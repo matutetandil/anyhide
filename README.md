@@ -421,6 +421,28 @@ anyhide chat --profile bob alice
 
 Each profile gets separate config and Tor state directories.
 
+**Ephemeral chat (no saved contact):**
+```bash
+# Chat without saving the contact - session data is lost when you quit
+# Useful for one-time conversations or maximum privacy
+
+# Option 1: Using command line arguments
+anyhide chat -e --onion <peer.onion> --pubkey <hex64> --sign-key <hex64>
+
+# Option 2: Using a QR code image
+anyhide chat -e --from-qr contact_qr.png
+
+# Example with inline keys:
+anyhide chat -e \
+  --onion xyz123abc.onion \
+  --pubkey 0101010101010101010101010101010101010101010101010101010101010101 \
+  --sign-key 0202020202020202020202020202020202020202020202020202020202020202
+```
+
+The ephemeral contact will appear as `~ephemeral` in the TUI and won't be saved to your contacts file.
+
+**Note on data persistence:** In ALL chat modes (normal or ephemeral), messages and session keys are NEVER written to disk. All cryptographic state is kept in RAM only and zeroized when the session ends. The only difference is whether the contact identity (onion address, public keys) is saved to `chat.toml`.
+
 **Chat session commands:**
 - `/quit` or `/q` - Exit the chat
 - `/status` or `/s` - Show session statistics

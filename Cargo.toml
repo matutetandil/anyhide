@@ -1,6 +1,6 @@
 [package]
 name = "anyhide"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "Hide any data in any file(s) - steganography tool with hybrid encryption and plausible deniability"
 license = "MIT"

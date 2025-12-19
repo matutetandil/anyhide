@@ -59,6 +59,18 @@ pub struct ChatContact {
     pub signing_key: PathBuf,
 }
 
+/// Ephemeral contact - not persisted, only valid for current session.
+/// Contains raw key bytes instead of file paths.
+#[derive(Debug, Clone)]
+pub struct EphemeralContact {
+    /// Contact's .onion address (without port).
+    pub onion_address: String,
+    /// Their encryption public key (32 bytes).
+    pub public_key: [u8; 32],
+    /// Their signing public key (32 bytes).
+    pub signing_key: [u8; 32],
+}
+
 /// Chat identity - your own onion service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatIdentity {
@@ -156,6 +168,27 @@ pub struct ChatCommand {
     /// Profile name for separate identity (useful for local testing)
     #[arg(long, global = true)]
     pub profile: Option<String>,
+
+    // === Ephemeral contact options ===
+    /// Ephemeral mode: chat without saving contact. Requires --onion, --pubkey, --sign-key.
+    #[arg(short = 'e', long = "ephemeral")]
+    pub ephemeral: bool,
+
+    /// Peer's .onion address (for ephemeral mode)
+    #[arg(long, requires = "ephemeral")]
+    pub onion: Option<String>,
+
+    /// Peer's encryption public key in hex (for ephemeral mode)
+    #[arg(long, requires = "ephemeral")]
+    pub pubkey: Option<String>,
+
+    /// Peer's signing public key in hex (for ephemeral mode)
+    #[arg(long = "sign-key", requires = "ephemeral")]
+    pub sign_key: Option<String>,
+
+    /// Import ephemeral contact from QR code image (alternative to --onion/--pubkey/--sign-key)
+    #[arg(long = "from-qr", requires = "ephemeral")]
+    pub from_qr: Option<PathBuf>,
 
     #[command(subcommand)]
     pub action: Option<ChatAction>,
@@ -260,6 +293,11 @@ impl CommandExecutor for ChatCommand {
         let profile = self.profile.as_deref();
 
         rt.block_on(async {
+            // Handle ephemeral mode
+            if self.ephemeral {
+                return self.start_ephemeral_chat(profile).await;
+            }
+
             // If a contact name is provided, start chat
             if let Some(contact) = &self.contact {
                 return start_chat(
@@ -301,11 +339,272 @@ impl CommandExecutor for ChatCommand {
                     println!("  anyhide chat export-qr [-o file.png]    Export identity to QR");
                     println!("  anyhide chat import-qr <image> -n <name> Import contact from QR");
                     println!("  anyhide chat me                         Show your identity");
+                    println!();
+                    println!("Ephemeral mode (no saved contact):");
+                    println!("  anyhide chat -e --onion <addr> --pubkey <hex> --sign-key <hex>");
+                    println!("  anyhide chat -e --from-qr <image>");
                     Ok(())
                 }
             }
         })
     }
+}
+
+impl ChatCommand {
+    /// Start an ephemeral chat session (contact not saved).
+    async fn start_ephemeral_chat(&self, profile: Option<&str>) -> Result<()> {
+        // Parse ephemeral contact from args or QR
+        let ephemeral_contact = if let Some(qr_path) = &self.from_qr {
+            // Import from QR code
+            parse_ephemeral_from_qr(qr_path)?
+        } else if let (Some(onion), Some(pubkey_hex), Some(sign_key_hex)) =
+            (&self.onion, &self.pubkey, &self.sign_key)
+        {
+            // Parse from command line args
+            parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex)?
+        } else {
+            bail!(
+                "Ephemeral mode requires either:\n\
+                 - --from-qr <image>\n\
+                 - --onion <addr> --pubkey <hex> --sign-key <hex>"
+            );
+        };
+
+        // Show warning about ephemeral session
+        println!("========================================");
+        println!("  EPHEMERAL SESSION");
+        println!("========================================");
+        println!("  This contact will NOT be saved.");
+        println!("  Session data is lost when you quit.");
+        println!("========================================");
+        println!();
+        println!("Contact: ~ephemeral");
+        println!("  Onion: {}", ephemeral_contact.onion_address);
+        println!("  Pubkey: {}...", hex::encode(&ephemeral_contact.public_key[..8]));
+        println!();
+
+        // Start chat with ephemeral contact
+        start_ephemeral_chat_session(
+            &ephemeral_contact,
+            self.carriers,
+            self.carrier_size,
+            self.carrier_files.as_deref(),
+            profile,
+        )
+        .await
+    }
+}
+
+/// Parse ephemeral contact from QR code image.
+fn parse_ephemeral_from_qr(qr_path: &PathBuf) -> Result<EphemeralContact> {
+    let data = read_qr_from_file(qr_path)
+        .with_context(|| format!("Failed to read QR code from {}", qr_path.display()))?;
+
+    let (onion, enc_pubkey, sign_pubkey, _nickname) = decode_chat_identity(&data)
+        .context("Failed to decode chat identity from QR")?;
+
+    // Clean onion address (remove .onion suffix for storage)
+    let onion_clean = onion.trim_end_matches(".onion").to_string();
+
+    Ok(EphemeralContact {
+        onion_address: format!("{}.onion", onion_clean),
+        public_key: enc_pubkey,
+        signing_key: sign_pubkey,
+    })
+}
+
+/// Parse ephemeral contact from command line arguments.
+fn parse_ephemeral_from_args(onion: &str, pubkey_hex: &str, sign_key_hex: &str) -> Result<EphemeralContact> {
+    // Parse encryption public key
+    let pubkey_bytes = hex::decode(pubkey_hex)
+        .context("Invalid --pubkey: must be valid hex")?;
+    if pubkey_bytes.len() != 32 {
+        bail!("Invalid --pubkey: must be 32 bytes (64 hex chars), got {}", pubkey_bytes.len());
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&pubkey_bytes);
+
+    // Parse signing public key
+    let sign_key_bytes = hex::decode(sign_key_hex)
+        .context("Invalid --sign-key: must be valid hex")?;
+    if sign_key_bytes.len() != 32 {
+        bail!("Invalid --sign-key: must be 32 bytes (64 hex chars), got {}", sign_key_bytes.len());
+    }
+    let mut signing_key = [0u8; 32];
+    signing_key.copy_from_slice(&sign_key_bytes);
+
+    // Clean onion address
+    let onion_clean = onion.split(':').next().unwrap_or(onion);
+    let onion_addr = if onion_clean.ends_with(".onion") {
+        onion_clean.to_string()
+    } else {
+        format!("{}.onion", onion_clean)
+    };
+
+    Ok(EphemeralContact {
+        onion_address: onion_addr,
+        public_key,
+        signing_key,
+    })
+}
+
+/// Start an ephemeral chat session with inline contact data.
+async fn start_ephemeral_chat_session(
+    contact: &EphemeralContact,
+    carriers_count: usize,
+    carrier_size: usize,
+    carrier_files: Option<&[PathBuf]>,
+    profile: Option<&str>,
+) -> Result<()> {
+    // Load configuration
+    let config = ChatConfig2::load()?;
+
+    // Verify identity is initialized
+    let identity = config
+        .identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Chat identity not initialized. Run 'anyhide chat init' first."))?;
+
+    // Prompt for passphrase FIRST
+    let passphrase = prompt_passphrase("Passphrase: ")?;
+    if passphrase.is_empty() {
+        bail!("Passphrase cannot be empty");
+    }
+
+    // Print security warning
+    print_tor_warning();
+
+    // Load our keys
+    let my_signing_keypair = SigningKeyPair::load_from_files(&identity.sign_key_path)
+        .context("Failed to load signing key pair")?;
+
+    // Create verifying key from raw bytes
+    let their_verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&contact.signing_key)
+        .context("Invalid signing public key")?;
+
+    // Bootstrap Tor client
+    print_bootstrap_message();
+    let tor_client = AnyhideTorClient::with_profile(profile)
+        .await
+        .context("Failed to bootstrap Tor client")?;
+
+    // Create our hidden service
+    println!("Creating hidden service '{}'...", identity.nickname);
+    let mut my_listener = tor_client
+        .listen(&identity.nickname)
+        .await
+        .context("Failed to create hidden service")?;
+
+    let my_onion = my_listener.onion_addr().to_string();
+    println!();
+    println!("Your .onion address: {}", my_onion);
+    println!();
+
+    // Prepare peer address
+    let peer_addr = format!("{}:{}", contact.onion_address, CHAT_PORT);
+
+    // Load pre-shared carriers if specified
+    let (preshared_carriers, chat_config) = if let Some(paths) = carrier_files {
+        println!("Loading {} pre-shared carrier file(s)...", paths.len());
+        let carriers = load_preshared_carriers(paths)?;
+        let hash = hash_carriers(&carriers);
+        println!("Carrier hash: {}", hex::encode(&hash[..8]));
+        (Some(carriers), ChatConfig::with_preshared_carriers(hash))
+    } else {
+        let mut config = ChatConfig::default();
+        config.carriers_per_party = carriers_count;
+        config.carrier_size = carrier_size;
+        (None, config)
+    };
+
+    // Connection + handshake loop with retries (Tor can be flaky)
+    let (mut session, mut conn) = loop {
+        println!("Looking for ephemeral contact...");
+
+        // Race: try to connect to them OR accept connection from them
+        let connection_result = tokio::select! {
+            // Try to connect to their hidden service
+            result = tor_client.connect(&peer_addr) => {
+                match result {
+                    Ok(conn) => {
+                        println!("Connected to ephemeral contact!");
+                        Some((conn, true))
+                    }
+                    Err(e) => {
+                        eprintln!("Contact not available: {}", e);
+                        None
+                    }
+                }
+            }
+            // Accept incoming connection
+            result = my_listener.accept() => {
+                match result {
+                    Ok(conn) => {
+                        println!("Ephemeral contact connected!");
+                        Some((conn, false))
+                    }
+                    Err(e) => {
+                        eprintln!("Accept error: {}", e);
+                        None
+                    }
+                }
+            }
+        };
+
+        let (mut conn, is_initiator) = match connection_result {
+            Some(c) => c,
+            None => {
+                println!("Retrying in 5 seconds... (Ctrl+C to cancel)");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // Generate ephemeral key for this session
+        let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let my_eph_public = PublicKey::from(&my_eph_secret);
+
+        // Perform handshake based on role
+        println!("Performing handshake...");
+        let handshake_result = if is_initiator {
+            perform_initiator_handshake(
+                &mut conn,
+                my_eph_secret,
+                my_eph_public,
+                &my_signing_keypair,
+                their_verifying_key,
+                chat_config.clone(),
+                preshared_carriers.as_deref(),
+                &passphrase,
+            )
+            .await
+        } else {
+            perform_responder_handshake(
+                &mut conn,
+                my_eph_secret,
+                my_eph_public,
+                &my_signing_keypair,
+                their_verifying_key,
+                chat_config.clone(),
+                preshared_carriers.as_deref(),
+                &passphrase,
+            )
+            .await
+        };
+
+        match handshake_result {
+            Ok(s) => break (s, conn),
+            Err(e) => {
+                eprintln!("Handshake failed: {}", e);
+                println!("Retrying in 5 seconds... (Ctrl+C to cancel)");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        }
+    };
+
+    // Chat loop with TUI - use "~ephemeral" as contact name
+    run_chat_loop(&mut session, &mut conn, "~ephemeral", &my_onion).await
 }
 
 /// Get base path (remove extension if present).
@@ -1486,5 +1785,94 @@ mod tests {
 
         // Should fit easily in QR Version 10 (capacity ~914 bytes in binary mode L)
         assert!(data.len() < 900);
+    }
+
+    // ==========================================================================
+    // Ephemeral Contact Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_ephemeral_from_args_valid() {
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        let pubkey_hex = "0101010101010101010101010101010101010101010101010101010101010101";
+        let sign_key_hex = "0202020202020202020202020202020202020202020202020202020202020202";
+
+        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+
+        assert_eq!(contact.onion_address, onion);
+        assert_eq!(contact.public_key, [1u8; 32]);
+        assert_eq!(contact.signing_key, [2u8; 32]);
+    }
+
+    #[test]
+    fn test_parse_ephemeral_from_args_without_onion_suffix() {
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx";
+        let pubkey_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let sign_key_hex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+
+        // Should add .onion suffix
+        assert_eq!(contact.onion_address, format!("{}.onion", onion));
+        assert_eq!(contact.public_key, [0xAA; 32]);
+        assert_eq!(contact.signing_key, [0xBB; 32]);
+    }
+
+    #[test]
+    fn test_parse_ephemeral_from_args_with_port() {
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:9999";
+        let pubkey_hex = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let sign_key_hex = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+
+        // Should strip port
+        assert_eq!(contact.onion_address, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion");
+    }
+
+    #[test]
+    fn test_parse_ephemeral_from_args_invalid_pubkey_hex() {
+        let onion = "test.onion";
+        let pubkey_hex = "not_valid_hex";
+        let sign_key_hex = "0202020202020202020202020202020202020202020202020202020202020202";
+
+        let result = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid --pubkey"));
+    }
+
+    #[test]
+    fn test_parse_ephemeral_from_args_wrong_pubkey_length() {
+        let onion = "test.onion";
+        let pubkey_hex = "0101010101"; // Too short (5 bytes)
+        let sign_key_hex = "0202020202020202020202020202020202020202020202020202020202020202";
+
+        let result = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn test_parse_ephemeral_from_args_invalid_sign_key_hex() {
+        let onion = "test.onion";
+        let pubkey_hex = "0101010101010101010101010101010101010101010101010101010101010101";
+        let sign_key_hex = "not_valid_hex";
+
+        let result = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid --sign-key"));
+    }
+
+    #[test]
+    fn test_ephemeral_contact_struct() {
+        let contact = EphemeralContact {
+            onion_address: "test.onion".to_string(),
+            public_key: [0xAA; 32],
+            signing_key: [0xBB; 32],
+        };
+
+        assert_eq!(contact.onion_address, "test.onion");
+        assert_eq!(contact.public_key.len(), 32);
+        assert_eq!(contact.signing_key.len(), 32);
     }
 }

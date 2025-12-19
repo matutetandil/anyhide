@@ -110,7 +110,19 @@ pub struct ChatSession {
 
 impl Drop for ChatSession {
     fn drop(&mut self) {
-        // Manually zeroize the HashMap values
+        // Zeroize all sensitive key material
+        self.header_key.zeroize();
+        self.send_chain.zeroize();
+        self.recv_chain.zeroize();
+        self.carrier_chain.zeroize();
+        self.my_dh_secret.zeroize();
+        self.my_dh_public.zeroize();
+        self.their_dh_public.zeroize();
+        self.user_passphrase.zeroize();
+        self.derived_passphrase.zeroize();
+        self.my_signing_key.zeroize();
+
+        // Zeroize skipped message keys
         for (_, key) in self.skipped_keys.drain() {
             let mut key_copy = key;
             key_copy.zeroize();
@@ -123,9 +135,6 @@ impl Drop for ChatSession {
         for carrier in &mut self.their_carriers {
             carrier.zeroize();
         }
-
-        // Zeroize header key
-        self.header_key.zeroize();
     }
 }
 
