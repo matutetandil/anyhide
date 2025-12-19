@@ -1,14 +1,31 @@
 //! Terminal User Interface for Anyhide Chat.
 //!
 //! This module provides a visual chat interface using ratatui.
+//!
+//! ## Single-peer TUI (legacy)
+//! - `App` - Single conversation state
+//! - `render` - Single conversation UI
+//!
+//! ## Multi-contact TUI
+//! - `MultiApp` - Multiple conversations with sidebar
+//! - `render_multi` - Multi-contact UI with tabs
 
 mod app;
 pub mod event;
 mod ui;
+mod multi_app;
+mod multi_ui;
+mod multi_event;
 
+// Single-peer exports (legacy, still used for single chat)
 pub use app::{App, ChatMessage, ConnectionStatus, MessageAuthor};
 pub use event::{Event, EventHandler, handle_command, handle_key_event, KeyAction};
 pub use ui::render;
+
+// Multi-contact exports
+pub use multi_app::{Contact, ContactStatus, Conversation, FocusedPanel, MultiApp};
+pub use multi_ui::render_multi;
+pub use multi_event::{handle_multi_command, handle_multi_key_event, MultiKeyAction};
 
 use std::io;
 
