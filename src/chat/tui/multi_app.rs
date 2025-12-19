@@ -20,6 +20,10 @@ pub enum ContactStatus {
     Ephemeral,
     /// Connecting to contact.
     Connecting,
+    /// Incoming chat request (waiting for us to accept).
+    IncomingRequest,
+    /// We sent a request, waiting for them to accept.
+    PendingAccept,
 }
 
 impl ContactStatus {
@@ -30,8 +34,107 @@ impl ContactStatus {
             ContactStatus::Offline => "○",
             ContactStatus::Ephemeral => "◌",
             ContactStatus::Connecting => "◐",
+            ContactStatus::IncomingRequest => "◀",  // Arrow pointing at us
+            ContactStatus::PendingAccept => "▶",    // Arrow pointing at them
         }
     }
+
+    /// Whether this status represents a pending request.
+    pub fn is_request(&self) -> bool {
+        matches!(self, ContactStatus::IncomingRequest | ContactStatus::PendingAccept)
+    }
+}
+
+/// Type of notification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationKind {
+    /// Chat request from a known contact.
+    KnownContactRequest,
+    /// Chat request from an unknown/ephemeral source.
+    EphemeralRequest,
+    /// Connection established.
+    Connected,
+    /// Connection lost.
+    Disconnected,
+    /// Error occurred.
+    Error,
+    /// Informational message.
+    Info,
+}
+
+impl NotificationKind {
+    /// Get the icon for this notification type.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            NotificationKind::KnownContactRequest => "👤",
+            NotificationKind::EphemeralRequest => "👻",
+            NotificationKind::Connected => "✓",
+            NotificationKind::Disconnected => "✗",
+            NotificationKind::Error => "⚠",
+            NotificationKind::Info => "ℹ",
+        }
+    }
+}
+
+/// A notification for the UI.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    /// Unique ID for this notification.
+    pub id: u64,
+    /// Notification type.
+    pub kind: NotificationKind,
+    /// Message to display.
+    pub message: String,
+    /// Associated contact/onion (if any).
+    pub source: Option<String>,
+    /// Timestamp when notification was created.
+    pub timestamp: u64,
+    /// Whether this notification has been seen.
+    pub seen: bool,
+}
+
+impl Notification {
+    /// Create a new notification.
+    pub fn new(id: u64, kind: NotificationKind, message: impl Into<String>) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            id,
+            kind,
+            message: message.into(),
+            source: None,
+            timestamp,
+            seen: false,
+        }
+    }
+
+    /// Set the source of this notification.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// Get display text for this notification.
+    pub fn display(&self) -> String {
+        format!("{} {}", self.kind.icon(), self.message)
+    }
+}
+
+/// A pending chat request.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    /// Unique ID for this request.
+    pub id: u64,
+    /// Source onion address.
+    pub onion_address: String,
+    /// Contact name (if known).
+    pub contact_name: Option<String>,
+    /// Whether this is from a known contact.
+    pub is_known: bool,
+    /// Timestamp when request was received.
+    pub timestamp: u64,
 }
 
 /// A contact in the sidebar.
@@ -45,6 +148,8 @@ pub struct Contact {
     pub unread: u32,
     /// Whether this is an ephemeral contact.
     pub is_ephemeral: bool,
+    /// Onion address (for known contacts).
+    pub onion_address: Option<String>,
 }
 
 impl Contact {
@@ -55,6 +160,18 @@ impl Contact {
             status: ContactStatus::Offline,
             unread: 0,
             is_ephemeral: false,
+            onion_address: None,
+        }
+    }
+
+    /// Create a new contact with onion address.
+    pub fn with_onion(name: impl Into<String>, onion: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: ContactStatus::Offline,
+            unread: 0,
+            is_ephemeral: false,
+            onion_address: Some(onion.into()),
         }
     }
 
@@ -65,6 +182,18 @@ impl Contact {
             status: ContactStatus::Ephemeral,
             unread: 0,
             is_ephemeral: true,
+            onion_address: None,
+        }
+    }
+
+    /// Create ephemeral contact with onion address (for incoming requests).
+    pub fn ephemeral_with_onion(name: impl Into<String>, onion: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: ContactStatus::Ephemeral,
+            unread: 0,
+            is_ephemeral: true,
+            onion_address: Some(onion.into()),
         }
     }
 
@@ -203,6 +332,14 @@ pub struct MultiApp {
     pub my_onion: Option<String>,
     /// Temporary status message (errors, warnings).
     pub status_message: Option<(String, u64)>, // (message, timestamp)
+
+    // === Notifications & Requests ===
+    /// Pending chat requests (not yet accepted/rejected).
+    pub pending_requests: Vec<ChatRequest>,
+    /// Notification queue (non-invasive alerts).
+    pub notifications: Vec<Notification>,
+    /// Counter for unique IDs.
+    next_id: u64,
 }
 
 impl MultiApp {
@@ -223,7 +360,17 @@ impl MultiApp {
             tor_status: ConnectionStatus::Disconnected,
             my_onion: None,
             status_message: None,
+            pending_requests: Vec::new(),
+            notifications: Vec::new(),
+            next_id: 1,
         }
+    }
+
+    /// Get the next unique ID.
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// Load contacts from config.
@@ -421,6 +568,186 @@ impl MultiApp {
                 self.status_message = None;
             }
         }
+    }
+
+    // === Notifications & Requests ===
+
+    /// Add a notification.
+    pub fn add_notification(&mut self, kind: NotificationKind, message: impl Into<String>) -> u64 {
+        let id = self.next_id();
+        let notification = Notification::new(id, kind, message);
+        self.notifications.push(notification);
+        id
+    }
+
+    /// Add a notification with source.
+    pub fn add_notification_with_source(
+        &mut self,
+        kind: NotificationKind,
+        message: impl Into<String>,
+        source: impl Into<String>,
+    ) -> u64 {
+        let id = self.next_id();
+        let notification = Notification::new(id, kind, message).with_source(source);
+        self.notifications.push(notification);
+        id
+    }
+
+    /// Get unseen notification count.
+    pub fn unseen_notification_count(&self) -> usize {
+        self.notifications.iter().filter(|n| !n.seen).count()
+    }
+
+    /// Get unseen notification count by kind.
+    pub fn unseen_count_by_kind(&self, kind: &NotificationKind) -> usize {
+        self.notifications
+            .iter()
+            .filter(|n| !n.seen && &n.kind == kind)
+            .count()
+    }
+
+    /// Mark a notification as seen.
+    pub fn mark_notification_seen(&mut self, id: u64) {
+        if let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) {
+            n.seen = true;
+        }
+    }
+
+    /// Mark all notifications as seen.
+    pub fn mark_all_notifications_seen(&mut self) {
+        for n in &mut self.notifications {
+            n.seen = true;
+        }
+    }
+
+    /// Remove a notification by ID.
+    pub fn remove_notification(&mut self, id: u64) {
+        self.notifications.retain(|n| n.id != id);
+    }
+
+    /// Clear old notifications (older than 60 seconds and seen).
+    pub fn clear_old_notifications(&mut self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.notifications
+            .retain(|n| !n.seen || now - n.timestamp < 60);
+    }
+
+    /// Add a chat request (incoming).
+    pub fn add_chat_request(&mut self, onion_address: impl Into<String>) -> u64 {
+        let onion = onion_address.into();
+        let id = self.next_id();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Check if this is from a known contact (match by onion address)
+        let (is_known, contact_name) = self
+            .contacts
+            .iter()
+            .find(|c| c.onion_address.as_deref() == Some(&onion))
+            .map(|c| (true, Some(c.name.clone())))
+            .unwrap_or((false, None));
+
+        let request = ChatRequest {
+            id,
+            onion_address: onion.clone(),
+            contact_name: contact_name.clone(),
+            is_known,
+            timestamp,
+        };
+        self.pending_requests.push(request);
+
+        // Add notification based on type
+        let (kind, msg) = if is_known {
+            let name = contact_name.as_deref().unwrap_or("contact");
+            (
+                NotificationKind::KnownContactRequest,
+                format!("{} wants to chat", name),
+            )
+        } else {
+            let short_onion = if onion.len() > 16 {
+                format!("{}...", &onion[..12])
+            } else {
+                onion.clone()
+            };
+            (
+                NotificationKind::EphemeralRequest,
+                format!("Unknown: {}", short_onion),
+            )
+        };
+        self.add_notification_with_source(kind, msg, onion);
+
+        id
+    }
+
+    /// Get pending request count.
+    pub fn pending_request_count(&self) -> usize {
+        self.pending_requests.len()
+    }
+
+    /// Get pending request count by type.
+    pub fn pending_request_count_by_type(&self, known: bool) -> usize {
+        self.pending_requests
+            .iter()
+            .filter(|r| r.is_known == known)
+            .count()
+    }
+
+    /// Get a pending request by ID.
+    pub fn get_request(&self, id: u64) -> Option<&ChatRequest> {
+        self.pending_requests.iter().find(|r| r.id == id)
+    }
+
+    /// Accept a chat request (returns the request and removes it from pending).
+    pub fn accept_request(&mut self, id: u64) -> Option<ChatRequest> {
+        let pos = self.pending_requests.iter().position(|r| r.id == id)?;
+        let request = self.pending_requests.remove(pos);
+
+        // Add notification
+        let name = request
+            .contact_name
+            .as_deref()
+            .unwrap_or(&request.onion_address);
+        self.add_notification(NotificationKind::Info, format!("Connecting to {}...", name));
+
+        // Remove the request notification
+        self.notifications.retain(|n| {
+            n.source.as_deref() != Some(&request.onion_address)
+                || !matches!(
+                    n.kind,
+                    NotificationKind::KnownContactRequest | NotificationKind::EphemeralRequest
+                )
+        });
+
+        Some(request)
+    }
+
+    /// Reject a chat request (removes it from pending).
+    pub fn reject_request(&mut self, id: u64) -> Option<ChatRequest> {
+        let pos = self.pending_requests.iter().position(|r| r.id == id)?;
+        let request = self.pending_requests.remove(pos);
+
+        // Remove the request notification
+        self.notifications.retain(|n| {
+            n.source.as_deref() != Some(&request.onion_address)
+                || !matches!(
+                    n.kind,
+                    NotificationKind::KnownContactRequest | NotificationKind::EphemeralRequest
+                )
+        });
+
+        Some(request)
+    }
+
+    /// Check if there's a pending request from this source.
+    pub fn has_pending_request(&self, onion_address: &str) -> bool {
+        self.pending_requests
+            .iter()
+            .any(|r| r.onion_address == onion_address)
     }
 
     // === Input handling ===
@@ -631,5 +958,152 @@ mod tests {
 
         app.select_up();
         assert_eq!(app.selected_contact, 2); // wrap
+    }
+
+    #[test]
+    fn test_notification_add_and_count() {
+        let mut app = MultiApp::new();
+
+        assert_eq!(app.unseen_notification_count(), 0);
+
+        app.add_notification(NotificationKind::Info, "Test message");
+        assert_eq!(app.unseen_notification_count(), 1);
+
+        app.add_notification(NotificationKind::Error, "Error message");
+        assert_eq!(app.unseen_notification_count(), 2);
+
+        // Mark one as seen
+        let first_id = app.notifications[0].id;
+        app.mark_notification_seen(first_id);
+        assert_eq!(app.unseen_notification_count(), 1);
+
+        // Mark all as seen
+        app.mark_all_notifications_seen();
+        assert_eq!(app.unseen_notification_count(), 0);
+    }
+
+    #[test]
+    fn test_notification_by_kind() {
+        let mut app = MultiApp::new();
+
+        app.add_notification(NotificationKind::KnownContactRequest, "Alice wants to chat");
+        app.add_notification(NotificationKind::EphemeralRequest, "Unknown request");
+        app.add_notification(NotificationKind::Info, "Info message");
+
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::KnownContactRequest), 1);
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::EphemeralRequest), 1);
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::Info), 1);
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::Error), 0);
+    }
+
+    #[test]
+    fn test_chat_request_unknown() {
+        let mut app = MultiApp::new();
+
+        let id = app.add_chat_request("abc123xyz456.onion");
+
+        assert_eq!(app.pending_request_count(), 1);
+        assert_eq!(app.pending_request_count_by_type(false), 1); // unknown
+        assert_eq!(app.pending_request_count_by_type(true), 0);  // known
+
+        // Should create a notification
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::EphemeralRequest), 1);
+
+        // Request should exist
+        let request = app.get_request(id).unwrap();
+        assert!(!request.is_known);
+        assert!(request.contact_name.is_none());
+    }
+
+    #[test]
+    fn test_chat_request_known_contact() {
+        let mut app = MultiApp::new();
+        let onion = "knowncontact12345.onion";
+        app.add_contact(Contact::with_onion("alice", onion));
+
+        let id = app.add_chat_request(onion);
+
+        assert_eq!(app.pending_request_count(), 1);
+        assert_eq!(app.pending_request_count_by_type(true), 1);  // known
+        assert_eq!(app.pending_request_count_by_type(false), 0); // unknown
+
+        // Should create a known contact notification
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::KnownContactRequest), 1);
+
+        // Request should be from known contact
+        let request = app.get_request(id).unwrap();
+        assert!(request.is_known);
+        assert_eq!(request.contact_name, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_accept_request() {
+        let mut app = MultiApp::new();
+
+        let id = app.add_chat_request("test123.onion");
+        assert_eq!(app.pending_request_count(), 1);
+
+        // Accept the request
+        let request = app.accept_request(id).unwrap();
+        assert_eq!(request.onion_address, "test123.onion");
+        assert_eq!(app.pending_request_count(), 0);
+
+        // Notification should be removed and replaced with "Connecting..."
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::EphemeralRequest), 0);
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::Info), 1);
+    }
+
+    #[test]
+    fn test_reject_request() {
+        let mut app = MultiApp::new();
+
+        let id = app.add_chat_request("test456.onion");
+        assert_eq!(app.pending_request_count(), 1);
+
+        // Reject the request
+        let request = app.reject_request(id).unwrap();
+        assert_eq!(request.onion_address, "test456.onion");
+        assert_eq!(app.pending_request_count(), 0);
+
+        // Request notification should be removed
+        assert_eq!(app.unseen_count_by_kind(&NotificationKind::EphemeralRequest), 0);
+    }
+
+    #[test]
+    fn test_has_pending_request() {
+        let mut app = MultiApp::new();
+
+        assert!(!app.has_pending_request("test.onion"));
+
+        app.add_chat_request("test.onion");
+        assert!(app.has_pending_request("test.onion"));
+        assert!(!app.has_pending_request("other.onion"));
+    }
+
+    #[test]
+    fn test_contact_status_icons() {
+        assert_eq!(ContactStatus::Online.icon(), "●");
+        assert_eq!(ContactStatus::Offline.icon(), "○");
+        assert_eq!(ContactStatus::Ephemeral.icon(), "◌");
+        assert_eq!(ContactStatus::Connecting.icon(), "◐");
+        assert_eq!(ContactStatus::IncomingRequest.icon(), "◀");
+        assert_eq!(ContactStatus::PendingAccept.icon(), "▶");
+    }
+
+    #[test]
+    fn test_contact_with_onion() {
+        let contact = Contact::with_onion("alice", "abc123.onion");
+        assert_eq!(contact.name, "alice");
+        assert_eq!(contact.onion_address, Some("abc123.onion".to_string()));
+        assert!(!contact.is_ephemeral);
+    }
+
+    #[test]
+    fn test_ephemeral_with_onion() {
+        let contact = Contact::ephemeral_with_onion("~guest", "xyz789.onion");
+        assert_eq!(contact.name, "~guest");
+        assert_eq!(contact.onion_address, Some("xyz789.onion".to_string()));
+        assert!(contact.is_ephemeral);
+        assert_eq!(contact.status, ContactStatus::Ephemeral);
     }
 }

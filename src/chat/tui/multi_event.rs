@@ -21,6 +21,14 @@ pub enum MultiKeyAction {
     AddContact,
     /// Quick ephemeral contact (show dialog).
     QuickEphemeral,
+    /// Accept a pending chat request (id).
+    AcceptRequest(u64),
+    /// Reject a pending chat request (id).
+    RejectRequest(u64),
+    /// View pending requests.
+    ViewRequests,
+    /// Mark all notifications as seen.
+    MarkNotificationsSeen,
 }
 
 /// Handle a key event for multi-contact TUI.
@@ -103,19 +111,48 @@ fn handle_sidebar_key(app: &mut MultiApp, key: KeyEvent) -> MultiKeyAction {
             app.select_down();
             MultiKeyAction::None
         }
-        // Open conversation
+        // Open conversation or accept request
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             if let Some(contact) = app.selected_contact().cloned() {
+                // Check if this contact has a pending incoming request
+                if contact.status == super::multi_app::ContactStatus::IncomingRequest {
+                    // Find the request for this contact
+                    if let Some(onion) = &contact.onion_address {
+                        if let Some(request) = app.pending_requests.iter().find(|r| &r.onion_address == onion) {
+                            return MultiKeyAction::AcceptRequest(request.id);
+                        }
+                    }
+                }
                 app.open_conversation(&contact.name);
                 MultiKeyAction::OpenConversation
             } else {
                 MultiKeyAction::None
             }
         }
+        // Reject request (x or Delete)
+        KeyCode::Char('x') | KeyCode::Delete => {
+            if let Some(contact) = app.selected_contact().cloned() {
+                if contact.status == super::multi_app::ContactStatus::IncomingRequest {
+                    if let Some(onion) = &contact.onion_address {
+                        if let Some(request) = app.pending_requests.iter().find(|r| &r.onion_address == onion) {
+                            return MultiKeyAction::RejectRequest(request.id);
+                        }
+                    }
+                }
+            }
+            MultiKeyAction::None
+        }
         // Add contact
-        KeyCode::Char('a') | KeyCode::Char('+') => MultiKeyAction::AddContact,
+        KeyCode::Char('+') => MultiKeyAction::AddContact,
         // Quick ephemeral
-        KeyCode::Char('q') | KeyCode::Char('e') => MultiKeyAction::QuickEphemeral,
+        KeyCode::Char('e') => MultiKeyAction::QuickEphemeral,
+        // View requests
+        KeyCode::Char('r') => MultiKeyAction::ViewRequests,
+        // Mark notifications as seen
+        KeyCode::Char('n') => {
+            app.mark_all_notifications_seen();
+            MultiKeyAction::MarkNotificationsSeen
+        }
         _ => MultiKeyAction::None,
     }
 }
@@ -236,9 +273,34 @@ pub fn handle_multi_command(app: &mut MultiApp, input: &str) -> MultiKeyAction {
             }
             MultiKeyAction::None
         }
+        Some("requests") | Some("r") => {
+            // Show pending requests in the active conversation or create a system message
+            let known = app.pending_request_count_by_type(true);
+            let unknown = app.pending_request_count_by_type(false);
+            let msg = format!(
+                "Pending requests: {} known, {} unknown. Press 'r' in sidebar to view.",
+                known, unknown
+            );
+            if let Some(conv) = app.active_conversation_mut() {
+                conv.add_system_message(&msg);
+            } else {
+                app.set_status_message(&msg);
+            }
+            MultiKeyAction::ViewRequests
+        }
+        Some("notifications") | Some("n") => {
+            let unseen = app.unseen_notification_count();
+            let msg = format!("{} unseen notifications. Press 'n' in sidebar to clear.", unseen);
+            if let Some(conv) = app.active_conversation_mut() {
+                conv.add_system_message(&msg);
+            } else {
+                app.set_status_message(&msg);
+            }
+            MultiKeyAction::None
+        }
         Some("help") | Some("h") => {
             if let Some(conv) = app.active_conversation_mut() {
-                conv.add_system_message("Commands: /quit /close /status /clear /help");
+                conv.add_system_message("Commands: /quit /close /status /clear /requests /notifications /help");
             }
             MultiKeyAction::None
         }

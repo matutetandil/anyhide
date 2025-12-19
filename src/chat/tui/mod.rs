@@ -23,9 +23,12 @@ pub use event::{Event, EventHandler, handle_command, handle_key_event, KeyAction
 pub use ui::render;
 
 // Multi-contact exports
-pub use multi_app::{Contact, ContactStatus, Conversation, FocusedPanel, MultiApp};
-pub use multi_ui::render_multi;
+pub use multi_app::{
+    ChatRequest, Contact, ContactStatus, Conversation, FocusedPanel, MultiApp, Notification,
+    NotificationKind,
+};
 pub use multi_event::{handle_multi_command, handle_multi_key_event, MultiKeyAction};
+pub use multi_ui::render_multi;
 
 use std::io;
 

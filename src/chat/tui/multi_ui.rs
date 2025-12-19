@@ -112,6 +112,8 @@ fn get_contact_style(contact: &Contact) -> Style {
         ContactStatus::Offline => Style::default().fg(Color::DarkGray),
         ContactStatus::Ephemeral => Style::default().fg(Color::Yellow),
         ContactStatus::Connecting => Style::default().fg(Color::Blue),
+        ContactStatus::IncomingRequest => Style::default().fg(Color::Magenta),
+        ContactStatus::PendingAccept => Style::default().fg(Color::Cyan),
     }
 }
 
@@ -452,10 +454,40 @@ fn render_status_bar(frame: &mut Frame, app: &MultiApp, area: Rect) {
         spans.push(Span::raw(" "));
     }
 
-    // Keyboard hints
+    // Pending requests indicator
+    let pending = app.pending_request_count();
+    if pending > 0 {
+        let known = app.pending_request_count_by_type(true);
+        let unknown = app.pending_request_count_by_type(false);
+        spans.push(Span::raw("| "));
+        if known > 0 {
+            spans.push(Span::styled(
+                format!("👤{} ", known),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        if unknown > 0 {
+            spans.push(Span::styled(
+                format!("👻{} ", unknown),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
+
+    // Unseen notifications indicator
+    let unseen = app.unseen_notification_count();
+    if unseen > 0 {
+        spans.push(Span::raw("| "));
+        spans.push(Span::styled(
+            format!("🔔{} ", unseen),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+
+    // Keyboard hints (shorter to fit)
     spans.push(Span::raw("| "));
     spans.push(Span::styled(
-        "Tab: panel | ←→: tabs | Enter: open | Ctrl+Q: quit",
+        "Tab: panel | Ctrl+Q: quit",
         Style::default().fg(Color::DarkGray),
     ));
 
