@@ -33,6 +33,9 @@ use anyhide::chat::transport::{
 use anyhide::chat::tui::{
     init_terminal, restore_terminal, render, App, ConnectionStatus, Event, EventHandler,
     handle_key_event, handle_command, KeyAction,
+    // Multi-contact TUI
+    render_multi, Contact, ContactStatus, MultiApp, MultiKeyAction,
+    handle_multi_key_event, handle_multi_command,
 };
 
 use anyhide::chat::protocol::{decrypt_carriers, encrypt_carriers, hash_carriers};
@@ -329,21 +332,8 @@ impl CommandExecutor for ChatCommand {
                 Some(ChatAction::ImportQr { image, name }) => import_qr_contact(image, name),
                 Some(ChatAction::Me) => show_my_identity(),
                 None => {
-                    println!("Usage:");
-                    println!("  anyhide chat <contact>              Start chat with a contact");
-                    println!("  anyhide chat init -k <keys> -s <sign>   Initialize your identity");
-                    println!("  anyhide chat add <name> <onion> ...     Add a contact");
-                    println!("  anyhide chat list                       List contacts");
-                    println!("  anyhide chat show <name>                Show contact details");
-                    println!("  anyhide chat remove <name>              Remove a contact");
-                    println!("  anyhide chat export-qr [-o file.png]    Export identity to QR");
-                    println!("  anyhide chat import-qr <image> -n <name> Import contact from QR");
-                    println!("  anyhide chat me                         Show your identity");
-                    println!();
-                    println!("Ephemeral mode (no saved contact):");
-                    println!("  anyhide chat -e --onion <addr> --pubkey <hex> --sign-key <hex>");
-                    println!("  anyhide chat -e --from-qr <image>");
-                    Ok(())
+                    // No contact specified: launch multi-contact TUI
+                    start_multi_chat(profile).await
                 }
             }
         })
@@ -1670,6 +1660,185 @@ async fn run_tui_loop<T: MessageTransport>(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Start multi-contact chat TUI (dashboard mode).
+/// This is the main entry point when no specific contact is provided.
+async fn start_multi_chat(profile: Option<&str>) -> Result<()> {
+    // Load configuration
+    let config = ChatConfig2::load()?;
+
+    // Verify identity is initialized
+    let identity = config
+        .identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Chat identity not initialized. Run 'anyhide chat init' first."))?;
+
+    // Prompt for passphrase
+    let _passphrase = prompt_passphrase("Passphrase: ")?;
+    // Note: passphrase will be used for each connection when established
+
+    // Print security warning
+    print_tor_warning();
+
+    // Bootstrap Tor client
+    print_bootstrap_message();
+    let tor_client = AnyhideTorClient::with_profile(profile)
+        .await
+        .context("Failed to bootstrap Tor client")?;
+
+    // Create our hidden service
+    println!("Creating hidden service '{}'...", identity.nickname);
+    let mut my_listener = tor_client
+        .listen(&identity.nickname)
+        .await
+        .context("Failed to create hidden service")?;
+
+    let my_onion = my_listener.onion_addr().to_string();
+    println!();
+    println!("Your .onion address: {}", my_onion);
+    println!();
+
+    // Initialize terminal
+    let mut terminal = init_terminal()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize terminal: {}", e))?;
+
+    // Create multi-app state
+    let mut app = MultiApp::new();
+    app.tor_status = ConnectionStatus::Connected;
+    app.my_onion = Some(my_onion.clone());
+
+    // Load contacts from config
+    for (name, contact) in &config.contacts {
+        let mut ui_contact = Contact::with_onion(name, &contact.onion_address);
+        ui_contact.status = ContactStatus::Offline;
+        app.add_contact(ui_contact);
+    }
+
+    // Setup event handler
+    let mut events = EventHandler::new();
+    let event_tx = events.sender();
+    EventHandler::spawn_reader(event_tx, Duration::from_millis(100));
+
+    // Add welcome message as notification
+    app.add_notification(
+        anyhide::chat::tui::NotificationKind::Info,
+        "Multi-contact TUI ready. Select a contact to connect.",
+    );
+
+    // Main loop
+    let result = run_multi_tui_loop(&mut terminal, &mut app, &mut events, &mut my_listener).await;
+
+    // Restore terminal
+    restore_terminal(&mut terminal)
+        .map_err(|e| anyhow::anyhow!("Failed to restore terminal: {}", e))?;
+
+    result
+}
+
+/// Multi-contact TUI loop (dashboard mode).
+/// Currently supports viewing contacts and basic navigation.
+/// Active connections will be added in a future update.
+async fn run_multi_tui_loop(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
+    app: &mut MultiApp,
+    events: &mut EventHandler,
+    _listener: &mut anyhide::chat::transport::TorListener,
+) -> Result<()> {
+    loop {
+        // Draw UI
+        terminal.draw(|frame| render_multi(frame, app))?;
+
+        // Clear old notifications
+        app.clear_old_notifications();
+
+        // Handle events
+        tokio::select! {
+            // Terminal event (keyboard, resize, etc)
+            event = events.next() => {
+                match event {
+                    Some(Event::Key(key)) => {
+                        let action = handle_multi_key_event(app, key);
+                        match action {
+                            MultiKeyAction::Quit => {
+                                return Ok(());
+                            }
+                            MultiKeyAction::SendMessage => {
+                                let input = app.take_input();
+
+                                // Check for commands
+                                if input.starts_with('/') {
+                                    let cmd_action = handle_multi_command(app, &input);
+                                    if cmd_action == MultiKeyAction::Quit {
+                                        return Ok(());
+                                    }
+                                } else {
+                                    // No active session yet - show message
+                                    if let Some(conv) = app.active_conversation_mut() {
+                                        conv.add_system_message("Not connected. Select contact and press Enter to connect.");
+                                    }
+                                }
+                            }
+                            MultiKeyAction::OpenConversation => {
+                                // User selected a contact - show connection message
+                                if let Some(conv) = app.active_conversation_mut() {
+                                    conv.add_system_message("Connection management coming soon...");
+                                    conv.add_system_message("For now, use: anyhide chat <contact>");
+                                }
+                            }
+                            MultiKeyAction::AddContact => {
+                                app.set_status_message("Use: anyhide chat add <name> <onion> ...");
+                            }
+                            MultiKeyAction::QuickEphemeral => {
+                                app.set_status_message("Use: anyhide chat -e --onion <addr> ...");
+                            }
+                            MultiKeyAction::AcceptRequest(id) => {
+                                // Accept request - placeholder
+                                if let Some(request) = app.accept_request(id) {
+                                    if let Some(conv) = app.conversations.get_mut(&request.onion_address) {
+                                        conv.add_system_message("Connection accepted. Connecting...");
+                                    }
+                                    // TODO: Actually connect to the requester
+                                }
+                            }
+                            MultiKeyAction::RejectRequest(id) => {
+                                app.reject_request(id);
+                                app.set_status_message("Request rejected.");
+                            }
+                            MultiKeyAction::ViewRequests => {
+                                // Already handled in handle_multi_command
+                            }
+                            MultiKeyAction::MarkNotificationsSeen => {
+                                // Already handled in handle_multi_key_event
+                            }
+                            MultiKeyAction::CloseTab | MultiKeyAction::None => {}
+                        }
+                    }
+                    Some(Event::Resize(_, _)) => {
+                        // Terminal will redraw on next iteration
+                    }
+                    Some(Event::Tick) => {
+                        // Periodic tick - could check for incoming connections here
+                    }
+                    Some(Event::Mouse(_)) => {
+                        // Ignore mouse events for now
+                    }
+                    None => {
+                        // Event channel closed
+                        return Ok(());
+                    }
+                }
+
+                if app.should_quit {
+                    return Ok(());
+                }
+            }
+
+            // TODO: Handle incoming connections from listener
+            // This will be implemented in a future update:
+            // result = listener.accept() => { ... }
         }
     }
 }
