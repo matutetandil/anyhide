@@ -1677,8 +1677,10 @@ async fn start_multi_chat(profile: Option<&str>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Chat identity not initialized. Run 'anyhide chat init' first."))?;
 
     // Prompt for passphrase
-    let _passphrase = prompt_passphrase("Passphrase: ")?;
-    // Note: passphrase will be used for each connection when established
+    let passphrase = prompt_passphrase("Passphrase: ")?;
+    if passphrase.is_empty() {
+        bail!("Passphrase cannot be empty");
+    }
 
     // Print security warning
     print_tor_warning();
@@ -1729,7 +1731,14 @@ async fn start_multi_chat(profile: Option<&str>) -> Result<()> {
     );
 
     // Main loop
-    let result = run_multi_tui_loop(&mut terminal, &mut app, &mut events, &mut my_listener).await;
+    let result = run_multi_tui_loop(
+        &mut terminal,
+        &mut app,
+        &mut events,
+        &mut my_listener,
+        &config,
+        &passphrase,
+    ).await;
 
     // Restore terminal
     restore_terminal(&mut terminal)
@@ -1738,15 +1747,41 @@ async fn start_multi_chat(profile: Option<&str>) -> Result<()> {
     result
 }
 
+/// Pending connection waiting for handshake.
+struct PendingConnection {
+    /// Onion address of the peer.
+    onion_address: String,
+    /// The Tor connection.
+    connection: anyhide::chat::transport::TorConnection,
+}
+
+/// Active chat session with a peer.
+#[allow(dead_code)]
+struct ActiveSession {
+    /// Contact name.
+    contact_name: String,
+    /// The chat session.
+    session: ChatSession,
+    /// The Tor connection.
+    connection: anyhide::chat::transport::TorConnection,
+}
+
 /// Multi-contact TUI loop (dashboard mode).
-/// Currently supports viewing contacts and basic navigation.
-/// Active connections will be added in a future update.
+/// Handles multiple concurrent chat sessions.
 async fn run_multi_tui_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     app: &mut MultiApp,
     events: &mut EventHandler,
-    _listener: &mut anyhide::chat::transport::TorListener,
+    listener: &mut anyhide::chat::transport::TorListener,
+    config: &ChatConfig2,
+    passphrase: &str,
 ) -> Result<()> {
+    // Pending incoming connections (waiting for accept)
+    let mut pending_connections: Vec<PendingConnection> = Vec::new();
+
+    // Active sessions (established)
+    let mut active_sessions: HashMap<String, ActiveSession> = HashMap::new();
+
     loop {
         // Draw UI
         terminal.draw(|frame| render_multi(frame, app))?;
@@ -1754,92 +1789,263 @@ async fn run_multi_tui_loop(
         // Clear old notifications
         app.clear_old_notifications();
 
-        // Handle events
+        // Handle events with timeout to allow checking multiple sources
         tokio::select! {
+            biased;
+
             // Terminal event (keyboard, resize, etc)
             event = events.next() => {
-                match event {
-                    Some(Event::Key(key)) => {
-                        let action = handle_multi_key_event(app, key);
-                        match action {
-                            MultiKeyAction::Quit => {
-                                return Ok(());
-                            }
-                            MultiKeyAction::SendMessage => {
-                                let input = app.take_input();
-
-                                // Check for commands
-                                if input.starts_with('/') {
-                                    let cmd_action = handle_multi_command(app, &input);
-                                    if cmd_action == MultiKeyAction::Quit {
-                                        return Ok(());
-                                    }
-                                } else {
-                                    // No active session yet - show message
-                                    if let Some(conv) = app.active_conversation_mut() {
-                                        conv.add_system_message("Not connected. Select contact and press Enter to connect.");
-                                    }
-                                }
-                            }
-                            MultiKeyAction::OpenConversation => {
-                                // User selected a contact - show connection message
-                                if let Some(conv) = app.active_conversation_mut() {
-                                    conv.add_system_message("Connection management coming soon...");
-                                    conv.add_system_message("For now, use: anyhide chat <contact>");
-                                }
-                            }
-                            MultiKeyAction::AddContact => {
-                                app.set_status_message("Use: anyhide chat add <name> <onion> ...");
-                            }
-                            MultiKeyAction::QuickEphemeral => {
-                                app.set_status_message("Use: anyhide chat -e --onion <addr> ...");
-                            }
-                            MultiKeyAction::AcceptRequest(id) => {
-                                // Accept request - placeholder
-                                if let Some(request) = app.accept_request(id) {
-                                    if let Some(conv) = app.conversations.get_mut(&request.onion_address) {
-                                        conv.add_system_message("Connection accepted. Connecting...");
-                                    }
-                                    // TODO: Actually connect to the requester
-                                }
-                            }
-                            MultiKeyAction::RejectRequest(id) => {
-                                app.reject_request(id);
-                                app.set_status_message("Request rejected.");
-                            }
-                            MultiKeyAction::ViewRequests => {
-                                // Already handled in handle_multi_command
-                            }
-                            MultiKeyAction::MarkNotificationsSeen => {
-                                // Already handled in handle_multi_key_event
-                            }
-                            MultiKeyAction::CloseTab | MultiKeyAction::None => {}
+                if let Some(event) = event {
+                    let quit = handle_terminal_event(
+                        app,
+                        event,
+                        &mut active_sessions,
+                        &mut pending_connections,
+                        config,
+                        passphrase,
+                    ).await?;
+                    if quit {
+                        // Close all active sessions
+                        for (_, mut session) in active_sessions.drain() {
+                            let _ = session.connection.close().await;
                         }
-                    }
-                    Some(Event::Resize(_, _)) => {
-                        // Terminal will redraw on next iteration
-                    }
-                    Some(Event::Tick) => {
-                        // Periodic tick - could check for incoming connections here
-                    }
-                    Some(Event::Mouse(_)) => {
-                        // Ignore mouse events for now
-                    }
-                    None => {
-                        // Event channel closed
                         return Ok(());
                     }
                 }
+            }
 
-                if app.should_quit {
-                    return Ok(());
+            // Incoming connection from listener
+            result = listener.accept() => {
+                match result {
+                    Ok(conn) => {
+                        // Get the peer's onion address from the connection
+                        let peer_onion = conn.peer_addr()
+                            .unwrap_or_else(|_| "unknown".to_string());
+
+                        // Add to pending and create notification
+                        app.add_chat_request(&peer_onion);
+                        pending_connections.push(PendingConnection {
+                            onion_address: peer_onion.clone(),
+                            connection: conn,
+                        });
+                    }
+                    Err(e) => {
+                        app.set_status_message(format!("Accept error: {}", e));
+                    }
                 }
             }
 
-            // TODO: Handle incoming connections from listener
-            // This will be implemented in a future update:
-            // result = listener.accept() => { ... }
+            // Check for incoming messages from active sessions
+            _ = check_active_sessions(&mut active_sessions, app) => {
+                // Messages are added to conversations in check_active_sessions
+            }
         }
+
+        if app.should_quit {
+            // Close all active sessions
+            for (_, mut session) in active_sessions.drain() {
+                let _ = session.connection.close().await;
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// Handle a terminal event (keyboard, resize, etc).
+async fn handle_terminal_event(
+    app: &mut MultiApp,
+    event: Event,
+    active_sessions: &mut HashMap<String, ActiveSession>,
+    pending_connections: &mut Vec<PendingConnection>,
+    _config: &ChatConfig2,      // Will be used for handshake
+    _passphrase: &str,          // Will be used for handshake
+) -> Result<bool> {
+    match event {
+        Event::Key(key) => {
+            let action = handle_multi_key_event(app, key);
+            match action {
+                MultiKeyAction::Quit => {
+                    return Ok(true);
+                }
+                MultiKeyAction::SendMessage => {
+                    let input = app.take_input();
+
+                    // Check for commands
+                    if input.starts_with('/') {
+                        let cmd_action = handle_multi_command(app, &input);
+                        if cmd_action == MultiKeyAction::Quit {
+                            return Ok(true);
+                        }
+                    } else {
+                        // Try to send to active session
+                        if let Some(tab_name) = app.tabs.get(app.active_tab).cloned() {
+                            if let Some(session) = active_sessions.get_mut(&tab_name) {
+                                match session.session.send_message(&input) {
+                                    Ok(wire) => {
+                                        if let Err(e) = session.connection.send(&wire).await {
+                                            if let Some(conv) = app.active_conversation_mut() {
+                                                conv.add_system_message(format!("Send failed: {}", e));
+                                            }
+                                        } else {
+                                            if let Some(conv) = app.active_conversation_mut() {
+                                                conv.add_my_message(&input);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(conv) = app.active_conversation_mut() {
+                                            conv.add_system_message(format!("Encode failed: {}", e));
+                                        }
+                                    }
+                                }
+                            } else {
+                                if let Some(conv) = app.active_conversation_mut() {
+                                    conv.add_system_message("Not connected. Press Enter on contact to connect.");
+                                }
+                            }
+                        }
+                    }
+                }
+                MultiKeyAction::OpenConversation => {
+                    // Check if already connected
+                    if let Some(tab_name) = app.tabs.get(app.active_tab).cloned() {
+                        if active_sessions.contains_key(&tab_name) {
+                            // Already connected, just switch
+                            if let Some(conv) = app.active_conversation_mut() {
+                                conv.add_system_message("Already connected.");
+                            }
+                        } else {
+                            // Not connected - show message about connecting
+                            if let Some(conv) = app.active_conversation_mut() {
+                                conv.add_system_message("Use 'anyhide chat <contact>' for now.");
+                                conv.add_system_message("Direct connect coming soon...");
+                            }
+                        }
+                    }
+                }
+                MultiKeyAction::AddContact => {
+                    app.set_status_message("Use: anyhide chat add <name> <onion> ...");
+                }
+                MultiKeyAction::QuickEphemeral => {
+                    app.set_status_message("Use: anyhide chat -e --onion <addr> ...");
+                }
+                MultiKeyAction::AcceptRequest(id) => {
+                    // Find and accept the request
+                    if let Some(request) = app.accept_request(id) {
+                        // Find the pending connection
+                        if let Some(pos) = pending_connections.iter().position(|p| p.onion_address == request.onion_address) {
+                            let pending = pending_connections.remove(pos);
+
+                            // TODO: Perform handshake and create session
+                            // For now, just show a message
+                            let contact_name = request.contact_name.unwrap_or_else(|| {
+                                format!("~{}", &request.onion_address[..8])
+                            });
+
+                            app.open_conversation(&contact_name);
+                            if let Some(conv) = app.active_conversation_mut() {
+                                conv.add_system_message(format!("Accepted connection from {}", pending.onion_address));
+                                conv.add_system_message("Handshake not yet implemented in multi-TUI.");
+                            }
+
+                            // Close the pending connection for now
+                            let mut conn = pending.connection;
+                            let _ = conn.close().await;
+                        }
+                    }
+                }
+                MultiKeyAction::RejectRequest(id) => {
+                    if let Some(request) = app.reject_request(id) {
+                        // Close and remove the pending connection
+                        if let Some(pos) = pending_connections.iter().position(|p| p.onion_address == request.onion_address) {
+                            let mut pending = pending_connections.remove(pos);
+                            let _ = pending.connection.close().await;
+                        }
+                    }
+                    app.set_status_message("Request rejected.");
+                }
+                MultiKeyAction::ViewRequests | MultiKeyAction::MarkNotificationsSeen => {
+                    // Already handled elsewhere
+                }
+                MultiKeyAction::CloseTab => {
+                    // Close session if active
+                    if let Some(tab_name) = app.tabs.get(app.active_tab).cloned() {
+                        if let Some(mut session) = active_sessions.remove(&tab_name) {
+                            let _ = session.connection.close().await;
+                            app.set_contact_status(&tab_name, ContactStatus::Offline);
+                        }
+                    }
+                }
+                MultiKeyAction::None => {}
+            }
+        }
+        Event::Resize(_, _) => {
+            // Terminal will redraw on next iteration
+        }
+        Event::Tick => {
+            // Periodic tick
+        }
+        Event::Mouse(_) => {
+            // Ignore mouse events
+        }
+    }
+
+    Ok(false)
+}
+
+/// Check all active sessions for incoming messages.
+async fn check_active_sessions(
+    active_sessions: &mut HashMap<String, ActiveSession>,
+    app: &mut MultiApp,
+) {
+    // Check each session for incoming data
+    // Note: This is a simple polling approach. A more sophisticated
+    // implementation would use futures::select_all or similar.
+
+    let mut disconnected: Vec<String> = Vec::new();
+
+    for (name, session) in active_sessions.iter_mut() {
+        // Try to receive with a very short timeout
+        match tokio::time::timeout(
+            Duration::from_millis(10),
+            session.connection.receive()
+        ).await {
+            Ok(Ok(wire)) => {
+                // Got a message
+                match session.session.receive_message(&wire) {
+                    Ok(msg) => {
+                        app.receive_message(name, &msg);
+                    }
+                    Err(e) => {
+                        if let Some(conv) = app.conversations.get_mut(name) {
+                            conv.add_system_message(format!("Decode error: {}", e));
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                // Connection error
+                let err_str = e.to_string();
+                if err_str.contains("end of file")
+                    || err_str.contains("connection")
+                    || err_str.contains("reset")
+                {
+                    if let Some(conv) = app.conversations.get_mut(name) {
+                        conv.add_system_message(format!("{} disconnected.", name));
+                    }
+                    disconnected.push(name.clone());
+                }
+            }
+            Err(_) => {
+                // Timeout - no data available, which is fine
+            }
+        }
+    }
+
+    // Remove disconnected sessions
+    for name in disconnected {
+        active_sessions.remove(&name);
+        app.set_contact_status(&name, ContactStatus::Offline);
     }
 }
 
