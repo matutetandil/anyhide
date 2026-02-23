@@ -5,9 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] - 2025-12-19
+## [0.13.0] - 2025-12-23
 
 ### Added
+
+- **Multi-Contact Chat TUI Dashboard**
+  - Full-featured TUI with sidebar contacts, conversation tabs, and concurrent sessions
+  - `anyhide chat` (no args) launches the dashboard
+  - Sidebar shows all contacts with online/offline/connecting status
+  - Tab-based conversations: open multiple chats simultaneously
+  - **Request/Accept Protocol**:
+    - Incoming connections require manual acceptance (privacy-first)
+    - Notifications separated by type: known contacts (👤) vs unknown (👻)
+    - `r` to view known contact requests, `z` for unknown requests
+    - `n` to view next notification, `N` to mark all as seen
+    - Prevents DDoS via chat requests - you choose who to talk to
+  - **Connect on-demand**: Select contact + Enter to initiate connection
+  - **Add Contact dialog**: Press `+` in sidebar for multi-field form (Name, Onion, Public Key, Sign Key)
+  - **Quick Ephemeral dialog**: Press `e` in sidebar to start ephemeral chat by onion address
+
+- **UI Branding and Theming**
+  - App icon `⠿` (braille 6 dots) with `⠿ anyhide` title bar and version number
+  - Outer border with rounded corners (`border::ROUNDED`)
+  - Consistent cyan theme color throughout all panels
+  - Separator line below title bar
+
+- **Ratatui Native Tabs Widget**
+  - Active tab: cyan background, black text, bold
+  - Inactive tabs: dark gray text
+  - Unread badge format: ` alice (2) `
+  - No brackets in tab labels (clean look)
+
+- **Message Scrollbar**
+  - Vertical scrollbar on the message area (right side)
+  - Only appears when content overflows visible area
+  - Symbols: `▲` (up), `▼` (down), `│` (track), `█` (thumb)
+  - Position synchronized with scroll offset
+
+- **Doom-style Command Console**
+  - Drop-down overlay from top of screen (40% height)
+  - Rounded border with `⠿ Console` title
+  - Open with `/` (from sidebar/tabs) or `Ctrl+P` (from anywhere including input)
+  - Close with `Esc`
+  - Command history navigation with `↑`/`↓` arrows
+  - Output scrolling with `PageUp`/`PageDown`
+  - All console state securely zeroized (`console_zeroize()`) on session end
+  - Available commands:
+    - `/quit` (`q`, `exit`) - Quit application
+    - `/close` (`c`) - Close active tab
+    - `/status` (`s`) - Show session status
+    - `/clear` - Clear messages or console output
+    - `/requests` (`r`) - Show pending chat requests
+    - `/notifications` (`n`) - Show notification count
+    - `/help` (`h`, `?`) - Show commands; `/help keys` shows all keyboard shortcuts
+    - `/debug` (`d`) - Show debug info (onion, contacts, sessions, Tor status)
+    - `/myonion` (`me`) - Show your .onion address
+    - `/who <name>` - Show a contact's .onion address
+
+- **Enhanced Status Bar**
+  - Tor connection status: `🔒 Tor ●` / `⚠ Tor ○` / `◐ Tor...`
+  - Chat/hidden service status: `Chat ●` / `Chat ◐` / `Chat ○`
+  - Truncated .onion address
+  - Pending request indicators: `👤N` (known), `👻N` (unknown)
+  - Unseen notification indicator: `🔔N`
+  - Context-sensitive keyboard hints per focused panel:
+    - Sidebar: `↑↓: nav | Enter: open | /: console`
+    - Tabs: `←→: tabs | PgUp/Dn: scroll | /: console`
+    - Input: `Enter: send | PgUp/Dn: scroll | Ctrl+P: console`
+  - Temporary status messages with 5-second auto-expiry
+
+- **Keyboard Navigation**
+  - Global: `Ctrl+Q` quit, `Ctrl+P` console, `Tab`/`Shift+Tab` cycle panels
+  - Global: `Ctrl+W` close tab, `Ctrl+←/→` or `Alt+←/→` switch tabs, `Alt+1-9` go to tab
+  - Sidebar: `↑/↓` or `j/k` navigate, `Enter` open, `+` add, `e` ephemeral, `/` console
+  - Sidebar: `r` known requests, `z` unknown requests, `n` view notification, `N` mark all seen
+  - Tabs: `←/→` or `h/l` switch, `PageUp/Down` scroll 5 lines, `Ctrl+↑/↓` scroll 1 line
+  - Input: `Enter` send, `PageUp/Down` scroll 5 lines, `Ctrl+↑/↓` scroll 1 line
+  - Console: `↑/↓` history, `PageUp/Down` scroll output, `Esc` close
 
 - **Ephemeral Chat Contacts**
   - Chat without saving contact to config file
@@ -16,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Contact appears as `~ephemeral` in TUI
   - Ideal for one-time conversations or maximum privacy
   - Same security features as regular chat (Double Ratchet, Tor, etc.)
+
+### Changed
+
+- `Ctrl+C` no longer quits the application (only `Ctrl+Q` and `Esc` do)
+- Contact status icons updated: `◀` for incoming request, `▶` for pending accept
 
 ### Fixed
 
@@ -26,6 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Note: Messages and session keys are NEVER written to disk in ANY chat mode
   - The only difference between normal and ephemeral chat is whether the
     contact identity is saved to `chat.toml`
+
+- **Security: Console state zeroization**
+  - All console input, output history, and command history are securely
+    zeroized when the session ends (`console_zeroize()`)
 
 ```bash
 # Ephemeral chat with inline keys

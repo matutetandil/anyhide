@@ -16,6 +16,7 @@ mod ui;
 mod multi_app;
 mod multi_ui;
 mod multi_event;
+mod multi_commands;
 
 // Single-peer exports (legacy, still used for single chat)
 pub use app::{App, ChatMessage, ConnectionStatus, MessageAuthor};
@@ -24,8 +25,8 @@ pub use ui::render;
 
 // Multi-contact exports
 pub use multi_app::{
-    ChatRequest, Contact, ContactStatus, Conversation, FocusedPanel, MultiApp, Notification,
-    NotificationKind,
+    ChatRequest, ChatServiceStatus, Contact, ContactStatus, Conversation, Dialog, DialogKind,
+    FocusedPanel, MultiApp, Notification, NotificationKind,
 };
 pub use multi_event::{handle_multi_command, handle_multi_key_event, MultiKeyAction};
 pub use multi_ui::render_multi;

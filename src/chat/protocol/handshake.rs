@@ -26,7 +26,10 @@ pub struct HandshakeInit {
     pub identity_public: [u8; 32],
     /// Proposed configuration.
     pub config: ChatConfig,
-    /// Ed25519 signature over (version || ephemeral_public || identity_public || config).
+    /// Whether the initiator knows the responder (has them as a contact).
+    /// Used for mutual recognition passphrase logic.
+    pub i_know_you: bool,
+    /// Ed25519 signature over (version || ephemeral_public || identity_public || config || i_know_you).
     pub signature: Vec<u8>,
 }
 
@@ -38,11 +41,13 @@ impl HandshakeInit {
     /// * `ephemeral_public` - Session ephemeral public key.
     /// * `identity_public` - Long-term identity public key.
     /// * `config` - Proposed session configuration.
+    /// * `i_know_you` - Whether the initiator knows the responder as a contact.
     /// * `signature` - Ed25519 signature over the handshake data.
     pub fn new(
         ephemeral_public: [u8; 32],
         identity_public: [u8; 32],
         config: ChatConfig,
+        i_know_you: bool,
         signature: Vec<u8>,
     ) -> Self {
         Self {
@@ -50,6 +55,7 @@ impl HandshakeInit {
             ephemeral_public,
             identity_public,
             config,
+            i_know_you,
             signature,
         }
     }
@@ -61,6 +67,7 @@ impl HandshakeInit {
         data.extend_from_slice(&self.ephemeral_public);
         data.extend_from_slice(&self.identity_public);
         data.extend_from_slice(&bincode::serialize(&self.config).unwrap());
+        data.push(if self.i_know_you { 1 } else { 0 });
         data
     }
 
@@ -86,18 +93,31 @@ pub struct HandshakeResponse {
     pub identity_public: [u8; 32],
     /// Agreed configuration (may differ from proposed).
     pub config: ChatConfig,
+    /// Whether the responder knows the initiator (has them as a contact).
+    /// Used for mutual recognition passphrase logic.
+    pub i_know_you: bool,
     /// Encrypted carriers using session key.
     pub encrypted_carriers: Vec<u8>,
-    /// Ed25519 signature over (version || ephemeral_public || identity_public || config || hash(carriers)).
+    /// Ed25519 signature over (version || ephemeral_public || identity_public || config || i_know_you || hash(carriers)).
     pub signature: Vec<u8>,
 }
 
 impl HandshakeResponse {
     /// Create a new handshake response.
+    ///
+    /// # Arguments
+    ///
+    /// * `ephemeral_public` - Session ephemeral public key.
+    /// * `identity_public` - Long-term identity public key.
+    /// * `config` - Agreed session configuration.
+    /// * `i_know_you` - Whether the responder knows the initiator as a contact.
+    /// * `encrypted_carriers` - Encrypted carrier data.
+    /// * `signature` - Ed25519 signature over the handshake data.
     pub fn new(
         ephemeral_public: [u8; 32],
         identity_public: [u8; 32],
         config: ChatConfig,
+        i_know_you: bool,
         encrypted_carriers: Vec<u8>,
         signature: Vec<u8>,
     ) -> Self {
@@ -106,6 +126,7 @@ impl HandshakeResponse {
             ephemeral_public,
             identity_public,
             config,
+            i_know_you,
             encrypted_carriers,
             signature,
         }
@@ -118,6 +139,7 @@ impl HandshakeResponse {
         data.extend_from_slice(&self.ephemeral_public);
         data.extend_from_slice(&self.identity_public);
         data.extend_from_slice(&bincode::serialize(&self.config).unwrap());
+        data.push(if self.i_know_you { 1 } else { 0 });
         data.extend_from_slice(carrier_hash);
         data
     }
@@ -259,6 +281,7 @@ mod tests {
             [1u8; 32],
             [2u8; 32],
             ChatConfig::default(),
+            true, // i_know_you
             vec![3u8; 64],
         );
 
@@ -269,6 +292,7 @@ mod tests {
         assert_eq!(init.ephemeral_public, decoded.ephemeral_public);
         assert_eq!(init.identity_public, decoded.identity_public);
         assert_eq!(init.config, decoded.config);
+        assert_eq!(init.i_know_you, decoded.i_know_you);
         assert_eq!(init.signature, decoded.signature);
     }
 
@@ -278,6 +302,7 @@ mod tests {
             [1u8; 32],
             [2u8; 32],
             ChatConfig::default(),
+            true, // i_know_you
             vec![4, 5, 6],
             vec![3u8; 64],
         );
@@ -287,6 +312,7 @@ mod tests {
 
         assert_eq!(response.version, decoded.version);
         assert_eq!(response.ephemeral_public, decoded.ephemeral_public);
+        assert_eq!(response.i_know_you, decoded.i_know_you);
         assert_eq!(response.encrypted_carriers, decoded.encrypted_carriers);
     }
 

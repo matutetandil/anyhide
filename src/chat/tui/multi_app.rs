@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroize;
 
 // Re-export from single-peer app for compatibility
 pub use super::app::{ChatMessage, ConnectionStatus, MessageAuthor, DEFAULT_MAX_MESSAGE_LEN};
@@ -42,6 +43,37 @@ impl ContactStatus {
     /// Whether this status represents a pending request.
     pub fn is_request(&self) -> bool {
         matches!(self, ContactStatus::IncomingRequest | ContactStatus::PendingAccept)
+    }
+}
+
+/// Chat service (hidden service) status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatServiceStatus {
+    /// Hidden service is starting up.
+    Starting,
+    /// Hidden service is ready and listening.
+    Ready,
+    /// Hidden service encountered an error.
+    Error,
+}
+
+impl ChatServiceStatus {
+    /// Get the icon for this status.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ChatServiceStatus::Starting => "◐",  // Half-filled
+            ChatServiceStatus::Ready => "●",     // Filled (green)
+            ChatServiceStatus::Error => "○",     // Empty (red)
+        }
+    }
+
+    /// Get the label for this status.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ChatServiceStatus::Starting => "Starting",
+            ChatServiceStatus::Ready => "Ready",
+            ChatServiceStatus::Error => "Error",
+        }
     }
 }
 
@@ -209,9 +241,9 @@ impl Contact {
     /// Get tab label with unread badge.
     pub fn tab_label(&self) -> String {
         if self.unread > 0 {
-            format!("[{}({})]", self.name, self.unread)
+            format!(" {} ({}) ", self.name, self.unread)
         } else {
-            format!("[{}]", self.name)
+            format!(" {} ", self.name)
         }
     }
 }
@@ -293,6 +325,295 @@ pub enum FocusedPanel {
     Input,
 }
 
+/// Type of dialog currently shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogKind {
+    /// Confirm initiating a chat (asks for passphrase).
+    InitiateChat {
+        /// Contact name to chat with.
+        contact_name: String,
+        /// Contact's onion address.
+        onion_address: String,
+    },
+    /// Incoming chat request (accept/cancel).
+    IncomingRequest {
+        /// Request ID.
+        request_id: u64,
+        /// Source name (contact name or truncated onion).
+        source_name: String,
+        /// Source onion address.
+        onion_address: String,
+        /// Whether this is from a known contact.
+        is_known: bool,
+    },
+    /// Accept a chat and enter passphrase.
+    AcceptChat {
+        /// Request ID being accepted.
+        request_id: u64,
+        /// Source name.
+        source_name: String,
+        /// Source onion address.
+        onion_address: String,
+    },
+    /// Generic error message.
+    Error {
+        /// Error title.
+        title: String,
+        /// Error message.
+        message: String,
+    },
+    /// View a notification.
+    ViewNotification {
+        /// Notification ID.
+        notification_id: u64,
+        /// Notification icon.
+        icon: String,
+        /// Notification message.
+        message: String,
+        /// Source (if any).
+        source: Option<String>,
+    },
+    /// Add a new contact dialog (multi-field).
+    AddContact,
+    /// Quick ephemeral chat dialog (single field: onion address).
+    QuickEphemeral,
+}
+
+/// Input field for multi-field dialogs.
+#[derive(Debug, Clone)]
+pub struct DialogInputField {
+    /// Field label.
+    pub label: String,
+    /// Current value.
+    pub value: String,
+    /// Cursor position.
+    pub cursor: usize,
+    /// Placeholder text.
+    pub placeholder: String,
+    /// Whether this field is required.
+    pub required: bool,
+}
+
+/// A dialog/modal shown over the TUI.
+#[derive(Debug, Clone)]
+pub struct Dialog {
+    /// Kind of dialog.
+    pub kind: DialogKind,
+    /// Password/passphrase input (if applicable).
+    pub password_input: String,
+    /// Cursor position in password input.
+    pub password_cursor: usize,
+    /// Currently focused button (0 = OK/Accept, 1 = Cancel).
+    pub focused_button: usize,
+    /// Multi-field inputs (for AddContact, QuickEphemeral).
+    pub fields: Vec<DialogInputField>,
+    /// Currently focused field index.
+    pub focused_field: usize,
+}
+
+impl Dialog {
+    /// Create a new dialog.
+    pub fn new(kind: DialogKind) -> Self {
+        Self {
+            kind,
+            password_input: String::new(),
+            password_cursor: 0,
+            focused_button: 0,
+            fields: Vec::new(),
+            focused_field: 0,
+        }
+    }
+
+    /// Create an initiate chat dialog.
+    pub fn initiate_chat(contact_name: impl Into<String>, onion_address: impl Into<String>) -> Self {
+        Self::new(DialogKind::InitiateChat {
+            contact_name: contact_name.into(),
+            onion_address: onion_address.into(),
+        })
+    }
+
+    /// Create an incoming request dialog.
+    pub fn incoming_request(
+        request_id: u64,
+        source_name: impl Into<String>,
+        onion_address: impl Into<String>,
+        is_known: bool,
+    ) -> Self {
+        Self::new(DialogKind::IncomingRequest {
+            request_id,
+            source_name: source_name.into(),
+            onion_address: onion_address.into(),
+            is_known,
+        })
+    }
+
+    /// Create an accept chat dialog (with passphrase input).
+    pub fn accept_chat(
+        request_id: u64,
+        source_name: impl Into<String>,
+        onion_address: impl Into<String>,
+    ) -> Self {
+        Self::new(DialogKind::AcceptChat {
+            request_id,
+            source_name: source_name.into(),
+            onion_address: onion_address.into(),
+        })
+    }
+
+    /// Create an error dialog.
+    pub fn error(title: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(DialogKind::Error {
+            title: title.into(),
+            message: message.into(),
+        })
+    }
+
+    /// Create a view notification dialog.
+    pub fn view_notification(notification: &Notification) -> Self {
+        Self::new(DialogKind::ViewNotification {
+            notification_id: notification.id,
+            icon: notification.kind.icon().to_string(),
+            message: notification.message.clone(),
+            source: notification.source.clone(),
+        })
+    }
+
+    /// Create an add contact dialog.
+    pub fn add_contact() -> Self {
+        let mut dialog = Self::new(DialogKind::AddContact);
+        dialog.fields = vec![
+            DialogInputField {
+                label: "Name".to_string(),
+                value: String::new(),
+                cursor: 0,
+                placeholder: "Contact alias".to_string(),
+                required: true,
+            },
+            DialogInputField {
+                label: "Onion".to_string(),
+                value: String::new(),
+                cursor: 0,
+                placeholder: "abc...xyz.onion".to_string(),
+                required: true,
+            },
+            DialogInputField {
+                label: "Public Key".to_string(),
+                value: String::new(),
+                cursor: 0,
+                placeholder: "Path to .pub file".to_string(),
+                required: true,
+            },
+            DialogInputField {
+                label: "Sign Key".to_string(),
+                value: String::new(),
+                cursor: 0,
+                placeholder: "Path to .sign.pub file".to_string(),
+                required: true,
+            },
+        ];
+        dialog
+    }
+
+    /// Create a quick ephemeral chat dialog.
+    pub fn quick_ephemeral() -> Self {
+        let mut dialog = Self::new(DialogKind::QuickEphemeral);
+        dialog.fields = vec![DialogInputField {
+            label: "Onion".to_string(),
+            value: String::new(),
+            cursor: 0,
+            placeholder: "abc...xyz.onion:port".to_string(),
+            required: true,
+        }];
+        dialog
+    }
+
+    /// Check if this dialog needs password input.
+    pub fn needs_password(&self) -> bool {
+        matches!(
+            self.kind,
+            DialogKind::InitiateChat { .. } | DialogKind::AcceptChat { .. }
+        )
+    }
+
+    /// Check if this dialog has multi-field input.
+    pub fn has_fields(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
+    /// Get the title for this dialog.
+    pub fn title(&self) -> &str {
+        match &self.kind {
+            DialogKind::InitiateChat { .. } => "Start Chat",
+            DialogKind::IncomingRequest { .. } => "Incoming Request",
+            DialogKind::AcceptChat { .. } => "Accept Chat",
+            DialogKind::Error { title, .. } => title,
+            DialogKind::ViewNotification { .. } => "Notification",
+            DialogKind::AddContact => "Add Contact",
+            DialogKind::QuickEphemeral => "Quick Chat",
+        }
+    }
+
+    /// Type a character into the password input.
+    pub fn type_char(&mut self, c: char) {
+        if self.has_fields() {
+            if let Some(field) = self.fields.get_mut(self.focused_field) {
+                field.value.insert(field.cursor, c);
+                field.cursor += 1;
+            }
+        } else {
+            self.password_input.insert(self.password_cursor, c);
+            self.password_cursor += 1;
+        }
+    }
+
+    /// Delete character before cursor.
+    pub fn delete_char(&mut self) {
+        if self.has_fields() {
+            if let Some(field) = self.fields.get_mut(self.focused_field) {
+                if field.cursor > 0 {
+                    field.cursor -= 1;
+                    field.value.remove(field.cursor);
+                }
+            }
+        } else if self.password_cursor > 0 {
+            self.password_cursor -= 1;
+            self.password_input.remove(self.password_cursor);
+        }
+    }
+
+    /// Move to next field.
+    pub fn next_field(&mut self) {
+        if self.has_fields() && self.focused_field < self.fields.len() - 1 {
+            self.focused_field += 1;
+        }
+    }
+
+    /// Move to previous field.
+    pub fn prev_field(&mut self) {
+        if self.has_fields() && self.focused_field > 0 {
+            self.focused_field -= 1;
+        }
+    }
+
+    /// Toggle focused button.
+    pub fn toggle_button(&mut self) {
+        self.focused_button = 1 - self.focused_button;
+    }
+
+    /// Check if all required fields are filled.
+    pub fn validate_fields(&self) -> bool {
+        self.fields
+            .iter()
+            .filter(|f| f.required)
+            .all(|f| !f.value.trim().is_empty())
+    }
+
+    /// Get field value by index.
+    pub fn field_value(&self, idx: usize) -> Option<&str> {
+        self.fields.get(idx).map(|f| f.value.as_str())
+    }
+}
+
 /// Multi-contact application state.
 pub struct MultiApp {
     // === Contacts ===
@@ -302,6 +623,8 @@ pub struct MultiApp {
     pub selected_contact: usize,
     /// Sidebar scroll offset.
     pub sidebar_scroll: usize,
+    /// Selected sidebar button (0 = Add, 1 = Quick, None = contact list).
+    pub selected_sidebar_button: Option<usize>,
 
     // === Conversations ===
     /// Active conversations (contact_name -> conversation).
@@ -328,6 +651,8 @@ pub struct MultiApp {
     // === Global Status ===
     /// Tor connection status.
     pub tor_status: ConnectionStatus,
+    /// Chat/Hidden service status.
+    pub chat_status: ChatServiceStatus,
     /// Our .onion address.
     pub my_onion: Option<String>,
     /// Temporary status message (errors, warnings).
@@ -340,6 +665,28 @@ pub struct MultiApp {
     pub notifications: Vec<Notification>,
     /// Counter for unique IDs.
     next_id: u64,
+
+    // === Dialogs ===
+    /// Currently active dialog (if any).
+    pub active_dialog: Option<Dialog>,
+
+    // === Console (Doom-style command input) ===
+    /// Whether the console is open.
+    pub console_open: bool,
+    /// Console input text.
+    pub console_input: String,
+    /// Console cursor position.
+    pub console_cursor: usize,
+    /// Console output history (lines).
+    pub console_output: Vec<String>,
+    /// Console scroll offset.
+    pub console_scroll: usize,
+    /// Command history (for up/down navigation).
+    pub console_history: Vec<String>,
+    /// Current position in history (None = new command).
+    pub console_history_index: Option<usize>,
+    /// Temporary storage for current input when navigating history.
+    pub console_history_temp: String,
 }
 
 impl MultiApp {
@@ -349,6 +696,7 @@ impl MultiApp {
             contacts: Vec::new(),
             selected_contact: 0,
             sidebar_scroll: 0,
+            selected_sidebar_button: None,
             conversations: HashMap::new(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -358,11 +706,21 @@ impl MultiApp {
             focused_panel: FocusedPanel::Sidebar,
             should_quit: false,
             tor_status: ConnectionStatus::Disconnected,
+            chat_status: ChatServiceStatus::Starting,
             my_onion: None,
             status_message: None,
             pending_requests: Vec::new(),
             notifications: Vec::new(),
             next_id: 1,
+            active_dialog: None,
+            console_open: false,
+            console_input: String::new(),
+            console_cursor: 0,
+            console_output: Vec::new(),
+            console_scroll: 0,
+            console_history: Vec::new(),
+            console_history_index: None,
+            console_history_temp: String::new(),
         }
     }
 
@@ -371,6 +729,50 @@ impl MultiApp {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    // === Dialog Management ===
+
+    /// Check if a dialog is currently active.
+    pub fn has_dialog(&self) -> bool {
+        self.active_dialog.is_some()
+    }
+
+    /// Show a dialog.
+    pub fn show_dialog(&mut self, dialog: Dialog) {
+        self.active_dialog = Some(dialog);
+    }
+
+    /// Close the current dialog.
+    pub fn close_dialog(&mut self) {
+        self.active_dialog = None;
+    }
+
+    /// Show initiate chat dialog.
+    pub fn show_initiate_dialog(&mut self, contact_name: &str, onion_address: &str) {
+        self.active_dialog = Some(Dialog::initiate_chat(contact_name, onion_address));
+    }
+
+    /// Show incoming request dialog.
+    pub fn show_incoming_request_dialog(&mut self, request: &ChatRequest) {
+        let source_name = request.contact_name.clone()
+            .unwrap_or_else(|| format!("~{}", &request.onion_address[..8.min(request.onion_address.len())]));
+        self.active_dialog = Some(Dialog::incoming_request(
+            request.id,
+            source_name,
+            &request.onion_address,
+            request.is_known,
+        ));
+    }
+
+    /// Show accept chat dialog (with passphrase).
+    pub fn show_accept_dialog(&mut self, request_id: u64, source_name: &str, onion_address: &str) {
+        self.active_dialog = Some(Dialog::accept_chat(request_id, source_name, onion_address));
+    }
+
+    /// Show error dialog.
+    pub fn show_error_dialog(&mut self, title: &str, message: &str) {
+        self.active_dialog = Some(Dialog::error(title, message));
     }
 
     /// Load contacts from config.
@@ -488,19 +890,66 @@ impl MultiApp {
 
     /// Move selection up in sidebar.
     pub fn select_up(&mut self) {
-        if !self.contacts.is_empty() {
-            self.selected_contact = if self.selected_contact == 0 {
-                self.contacts.len() - 1
-            } else {
-                self.selected_contact - 1
-            };
+        match self.selected_sidebar_button {
+            Some(0) => {
+                // From Add button, go back to last contact
+                self.selected_sidebar_button = None;
+                if !self.contacts.is_empty() {
+                    self.selected_contact = self.contacts.len() - 1;
+                }
+            }
+            Some(1) => {
+                // From Quick button, go to Add button
+                self.selected_sidebar_button = Some(0);
+            }
+            Some(_) => {
+                self.selected_sidebar_button = Some(0);
+            }
+            None => {
+                // In contacts list
+                if !self.contacts.is_empty() {
+                    if self.selected_contact == 0 {
+                        // Wrap to Quick button (bottom of sidebar)
+                        self.selected_sidebar_button = Some(1);
+                    } else {
+                        self.selected_contact -= 1;
+                    }
+                } else {
+                    // No contacts, wrap to Quick button
+                    self.selected_sidebar_button = Some(1);
+                }
+            }
         }
     }
 
     /// Move selection down in sidebar.
     pub fn select_down(&mut self) {
-        if !self.contacts.is_empty() {
-            self.selected_contact = (self.selected_contact + 1) % self.contacts.len();
+        match self.selected_sidebar_button {
+            Some(0) => {
+                // From Add button, go to Quick button
+                self.selected_sidebar_button = Some(1);
+            }
+            Some(1) => {
+                // From Quick button, wrap to first contact
+                self.selected_sidebar_button = None;
+                self.selected_contact = 0;
+            }
+            Some(_) => {
+                self.selected_sidebar_button = None;
+                self.selected_contact = 0;
+            }
+            None => {
+                // In contacts list
+                if self.contacts.is_empty() {
+                    // No contacts, go to Add button
+                    self.selected_sidebar_button = Some(0);
+                } else if self.selected_contact >= self.contacts.len() - 1 {
+                    // At last contact, go to Add button
+                    self.selected_sidebar_button = Some(0);
+                } else {
+                    self.selected_contact += 1;
+                }
+            }
         }
     }
 
@@ -635,6 +1084,11 @@ impl MultiApp {
             .retain(|n| !n.seen || now - n.timestamp < 60);
     }
 
+    /// Get the first unseen notification (if any).
+    pub fn first_unseen_notification(&self) -> Option<&Notification> {
+        self.notifications.iter().find(|n| !n.seen)
+    }
+
     /// Add a chat request (incoming).
     pub fn add_chat_request(&mut self, onion_address: impl Into<String>) -> u64 {
         let onion = onion_address.into();
@@ -680,6 +1134,40 @@ impl MultiApp {
             )
         };
         self.add_notification_with_source(kind, msg, onion);
+
+        id
+    }
+
+    /// Add a chat request with a pre-resolved name (from signing key lookup).
+    pub fn add_chat_request_with_name(&mut self, display_name: &str, is_known: bool) -> u64 {
+        let id = self.next_id();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let request = ChatRequest {
+            id,
+            onion_address: display_name.to_string(),
+            contact_name: if is_known { Some(display_name.to_string()) } else { None },
+            is_known,
+            timestamp,
+        };
+        self.pending_requests.push(request);
+
+        // Add notification
+        let (kind, msg) = if is_known {
+            (
+                NotificationKind::KnownContactRequest,
+                format!("{} wants to chat", display_name),
+            )
+        } else {
+            (
+                NotificationKind::EphemeralRequest,
+                format!("Unknown: {}", display_name),
+            )
+        };
+        self.add_notification_with_source(kind, msg, display_name.to_string());
 
         id
     }
@@ -821,6 +1309,172 @@ impl MultiApp {
         self.cursor_position = 0;
         std::mem::take(&mut self.input)
     }
+
+    // === Console Management ===
+
+    /// Toggle the console open/closed.
+    pub fn toggle_console(&mut self) {
+        self.console_open = !self.console_open;
+        if !self.console_open {
+            self.console_input.clear();
+            self.console_cursor = 0;
+            self.console_history_index = None;
+            self.console_history_temp.clear();
+        }
+    }
+
+    /// Open the console.
+    pub fn open_console(&mut self) {
+        self.console_open = true;
+    }
+
+    /// Close the console.
+    pub fn close_console(&mut self) {
+        self.console_open = false;
+        self.console_input.clear();
+        self.console_cursor = 0;
+        self.console_history_index = None;
+        self.console_history_temp.clear();
+    }
+
+    /// Type a character in the console.
+    pub fn console_type_char(&mut self, c: char) {
+        // Reset history navigation when typing
+        self.console_history_index = None;
+        self.console_input.insert(self.console_cursor, c);
+        self.console_cursor += 1;
+    }
+
+    /// Delete character before cursor in console.
+    pub fn console_delete_char(&mut self) {
+        if self.console_cursor > 0 {
+            self.console_history_index = None;
+            self.console_cursor -= 1;
+            self.console_input.remove(self.console_cursor);
+        }
+    }
+
+    /// Move console cursor left.
+    pub fn console_cursor_left(&mut self) {
+        self.console_cursor = self.console_cursor.saturating_sub(1);
+    }
+
+    /// Move console cursor right.
+    pub fn console_cursor_right(&mut self) {
+        let max = self.console_input.chars().count();
+        self.console_cursor = (self.console_cursor + 1).min(max);
+    }
+
+    /// Take the console input (but keep console open).
+    pub fn take_console_input(&mut self) -> String {
+        let input = std::mem::take(&mut self.console_input);
+        // Add to history if non-empty
+        if !input.is_empty() {
+            self.console_history.push(input.clone());
+        }
+        self.console_cursor = 0;
+        self.console_history_index = None;
+        self.console_history_temp.clear();
+        input
+    }
+
+    /// Navigate to previous command in history (Up arrow).
+    pub fn console_history_prev(&mut self) {
+        if self.console_history.is_empty() {
+            return;
+        }
+
+        match self.console_history_index {
+            None => {
+                // Save current input and go to most recent history
+                self.console_history_temp = self.console_input.clone();
+                self.console_history_index = Some(self.console_history.len() - 1);
+            }
+            Some(0) => {
+                // Already at oldest, do nothing
+                return;
+            }
+            Some(idx) => {
+                self.console_history_index = Some(idx - 1);
+            }
+        }
+
+        // Load history entry
+        if let Some(idx) = self.console_history_index {
+            self.console_input = self.console_history[idx].clone();
+            self.console_cursor = self.console_input.chars().count();
+        }
+    }
+
+    /// Navigate to next command in history (Down arrow).
+    pub fn console_history_next(&mut self) {
+        match self.console_history_index {
+            None => {
+                // Not in history mode, do nothing
+                return;
+            }
+            Some(idx) if idx >= self.console_history.len() - 1 => {
+                // At most recent, restore temp input
+                self.console_input = std::mem::take(&mut self.console_history_temp);
+                self.console_cursor = self.console_input.chars().count();
+                self.console_history_index = None;
+            }
+            Some(idx) => {
+                self.console_history_index = Some(idx + 1);
+                self.console_input = self.console_history[idx + 1].clone();
+                self.console_cursor = self.console_input.chars().count();
+            }
+        }
+    }
+
+    /// Add output lines to the console.
+    pub fn console_print(&mut self, text: &str) {
+        for line in text.lines() {
+            self.console_output.push(line.to_string());
+        }
+        // Auto-scroll to bottom
+        self.console_scroll = 0;
+    }
+
+    /// Add a single line to console output.
+    pub fn console_println(&mut self, line: &str) {
+        self.console_output.push(line.to_string());
+        self.console_scroll = 0;
+    }
+
+    /// Clear console output.
+    pub fn console_clear(&mut self) {
+        self.console_output.clear();
+        self.console_scroll = 0;
+    }
+
+    /// Scroll console up.
+    pub fn console_scroll_up(&mut self, lines: usize) {
+        let max_scroll = self.console_output.len().saturating_sub(5);
+        self.console_scroll = (self.console_scroll + lines).min(max_scroll);
+    }
+
+    /// Scroll console down.
+    pub fn console_scroll_down(&mut self, lines: usize) {
+        self.console_scroll = self.console_scroll.saturating_sub(lines);
+    }
+
+    /// Securely clear all console data (zeroize).
+    pub fn console_zeroize(&mut self) {
+        self.console_input.zeroize();
+        self.console_cursor = 0;
+        for line in &mut self.console_output {
+            line.zeroize();
+        }
+        self.console_output.clear();
+        self.console_scroll = 0;
+        for cmd in &mut self.console_history {
+            cmd.zeroize();
+        }
+        self.console_history.clear();
+        self.console_history_index = None;
+        self.console_history_temp.zeroize();
+    }
 }
 
 impl Default for MultiApp {
@@ -848,10 +1502,10 @@ mod tests {
     #[test]
     fn test_contact_tab_label() {
         let mut contact = Contact::new("bob");
-        assert_eq!(contact.tab_label(), "[bob]");
+        assert_eq!(contact.tab_label(), " bob ");
 
         contact.unread = 2;
-        assert_eq!(contact.tab_label(), "[bob(2)]");
+        assert_eq!(contact.tab_label(), " bob (2) ");
     }
 
     #[test]
@@ -946,18 +1600,41 @@ mod tests {
         app.add_contact(Contact::new("charlie"));
 
         assert_eq!(app.selected_contact, 0);
+        assert_eq!(app.selected_sidebar_button, None);
 
         app.select_down();
         assert_eq!(app.selected_contact, 1);
+        assert_eq!(app.selected_sidebar_button, None);
 
         app.select_down();
         assert_eq!(app.selected_contact, 2);
+        assert_eq!(app.selected_sidebar_button, None);
 
+        // After last contact, go to Add button
         app.select_down();
-        assert_eq!(app.selected_contact, 0); // wrap
+        assert_eq!(app.selected_sidebar_button, Some(0)); // Add button
 
+        // Then to Quick button
+        app.select_down();
+        assert_eq!(app.selected_sidebar_button, Some(1)); // Quick button
+
+        // Then wrap to first contact
+        app.select_down();
+        assert_eq!(app.selected_contact, 0);
+        assert_eq!(app.selected_sidebar_button, None);
+
+        // Go up should wrap to Quick button
         app.select_up();
-        assert_eq!(app.selected_contact, 2); // wrap
+        assert_eq!(app.selected_sidebar_button, Some(1)); // Quick button
+
+        // Then to Add button
+        app.select_up();
+        assert_eq!(app.selected_sidebar_button, Some(0)); // Add button
+
+        // Then to last contact
+        app.select_up();
+        assert_eq!(app.selected_contact, 2);
+        assert_eq!(app.selected_sidebar_button, None);
     }
 
     #[test]

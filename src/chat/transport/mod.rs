@@ -7,7 +7,10 @@ mod tcp;
 mod tor;
 
 pub use tcp::{TcpConnection, TcpListener, TcpTransport};
-pub use tor::{AnyhideTorClient, TorConnection, TorListener, print_tor_warning, print_bootstrap_message};
+pub use tor::{
+    print_bootstrap_message, print_tor_warning, AnyhideTorClient, OnionServiceHandle,
+    OnionServiceState, TorConnection, TorListener,
+};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

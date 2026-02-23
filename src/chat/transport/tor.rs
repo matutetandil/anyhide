@@ -18,9 +18,13 @@ use arti_client::{DataStream, TorClient, TorClientConfig};
 use tor_cell::relaycell::msg::Connected;
 use tor_hscrypto::pk::HsId;
 use tor_hsservice::{
-    config::OnionServiceConfigBuilder, HsNickname, RendRequest, RunningOnionService,
+    config::OnionServiceConfigBuilder, status::State as HsState, HsNickname, RendRequest,
+    RunningOnionService,
 };
 use tor_rtcompat::PreferredRuntime;
+
+// Re-export HsState for external use
+pub use tor_hsservice::status::State as OnionServiceState;
 
 use crate::chat::error::ChatError;
 use crate::chat::protocol::WireMessage;
@@ -84,6 +88,7 @@ fn base32_encode(data: &[u8]) -> String {
 }
 
 /// Wrapper around arti's TorClient for managing Tor connections.
+#[derive(Clone)]
 pub struct AnyhideTorClient {
     client: TorClient<PreferredRuntime>,
 }
@@ -197,7 +202,7 @@ impl AnyhideTorClient {
             .unwrap_or_else(|| "generating...".to_string());
 
         Ok(TorListener {
-            _service: service,
+            service,
             rend_requests: Box::pin(rend_requests),
             onion_addr,
         })
@@ -268,15 +273,86 @@ impl MessageTransport for TorConnection {
 
 /// A Tor listener for accepting incoming connections on a hidden service.
 pub struct TorListener {
-    _service: Arc<RunningOnionService>,
+    service: Arc<RunningOnionService>,
     rend_requests: std::pin::Pin<Box<dyn futures::Stream<Item = RendRequest> + Send>>,
     onion_addr: String,
 }
 
-impl TorListener {
+/// Handle for checking the status of a running onion service.
+/// Can be cloned and used from any task.
+#[derive(Clone)]
+pub struct OnionServiceHandle {
+    service: Arc<RunningOnionService>,
+    onion_addr: String,
+}
+
+impl OnionServiceHandle {
     /// Get the .onion address of this hidden service.
     pub fn onion_addr(&self) -> &str {
         &self.onion_addr
+    }
+
+    /// Get the current state of the hidden service.
+    pub fn state(&self) -> HsState {
+        self.service.status().state()
+    }
+
+    /// Check if the hidden service is published and reachable.
+    pub fn is_published(&self) -> bool {
+        matches!(
+            self.state(),
+            HsState::Running | HsState::DegradedReachable
+        )
+    }
+
+    /// Check if the hidden service is still bootstrapping.
+    pub fn is_bootstrapping(&self) -> bool {
+        matches!(self.state(), HsState::Bootstrapping)
+    }
+}
+
+impl TorListener {
+    /// Get a handle for checking the service status.
+    /// The handle can be cloned and used from any task.
+    pub fn handle(&self) -> OnionServiceHandle {
+        OnionServiceHandle {
+            service: self.service.clone(),
+            onion_addr: self.onion_addr.clone(),
+        }
+    }
+
+    /// Get the .onion address of this hidden service.
+    pub fn onion_addr(&self) -> &str {
+        &self.onion_addr
+    }
+
+    /// Get the current state of the hidden service.
+    ///
+    /// Returns the high-level operational state:
+    /// - `Bootstrapping` - Building intro points and publishing descriptor
+    /// - `Running` - Fully reachable, descriptor published
+    /// - `DegradedReachable` - Reachable but with issues
+    /// - `DegradedUnreachable` - Descriptor upload failed
+    /// - `Recovering` - Trying to recover from a problem
+    /// - `Broken` - Failed to start or maintain the service
+    pub fn state(&self) -> HsState {
+        self.service.status().state()
+    }
+
+    /// Check if the hidden service is published and reachable.
+    ///
+    /// Returns true when the service is in `Running` or `DegradedReachable` state,
+    /// meaning clients can potentially connect.
+    pub fn is_published(&self) -> bool {
+        matches!(
+            self.state(),
+            HsState::Running | HsState::DegradedReachable
+        )
+    }
+
+    /// Check if the hidden service is still bootstrapping.
+    pub fn is_bootstrapping(&self) -> bool {
+        matches!(self.state(), HsState::Bootstrapping)
     }
 
     /// Accept an incoming connection.
