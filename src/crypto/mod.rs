@@ -13,14 +13,24 @@ pub mod asymmetric;
 pub mod bip39_english;
 pub mod compression;
 pub mod ephemeral_store;
+pub mod hybrid_kem;
 pub mod keys;
 pub mod mnemonic;
 pub mod multi_recipient;
 pub mod signing;
 pub mod symmetric;
 
-pub use asymmetric::{decrypt, decrypt_from_bytes, encrypt, encrypt_to_bytes, AsymmetricError, EncryptedData};
+pub use asymmetric::{
+    decrypt, decrypt_from_bytes, decrypt_hybrid, decrypt_hybrid_from_bytes, encrypt,
+    encrypt_hybrid, encrypt_hybrid_to_bytes, encrypt_to_bytes, AsymmetricError, EncryptedData,
+    EncryptedDataHybrid,
+};
 pub use compression::{compress, decompress, CompressionError};
+pub use hybrid_kem::{
+    decapsulate as hybrid_decapsulate, encapsulate as hybrid_encapsulate,
+    generate_keypair as hybrid_generate_keypair, HybridCiphertext, HybridKemError,
+    HybridPublicKey, HybridSecretKey, SharedKey as HybridSharedKey,
+};
 pub use ephemeral_store::{
     load_private_key_for_contact, load_public_key_for_contact, load_unified_keys_for_contact,
     save_private_key_for_contact, save_public_key_for_contact, save_unified_keys_for_contact,
@@ -41,7 +51,10 @@ pub use keys::{
     save_ephemeral_private_key_pem, save_ephemeral_public_key_pem,
     KeyError, KeyPair, KeyType,
 };
-pub use multi_recipient::{decrypt_multi, encrypt_multi, MultiRecipientData, MultiRecipientError};
+pub use multi_recipient::{
+    decrypt_multi, decrypt_multi_hybrid, encrypt_multi, encrypt_multi_hybrid,
+    MultiRecipientData, MultiRecipientDataHybrid, MultiRecipientError, RecipientKeyHybrid,
+};
 pub use signing::{
     decode_signing_key_pem, decode_verifying_key_pem, load_signing_key, load_verifying_key,
     sign_message, verify_signature, SigningError, SigningKeyPair,

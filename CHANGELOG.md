@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Hybrid Post-Quantum KEM primitive** (`crypto/hybrid_kem.rs`)
+  - Combines classical X25519 ECDH with ML-KEM-768 (FIPS 203, formerly Kyber-768)
+  - Single-call API: `generate_keypair()`, `encapsulate()`, `decapsulate()`
+  - HKDF-SHA256 combiner with `ANYHIDE-HYBRID-KEM-V1` info string mixes both shared secrets — security holds as long as either primitive remains secure
+  - `try_decapsulate` on the PQ side rejects malformed ciphertexts explicitly instead of silently returning a pseudorandom value (implicit rejection)
+  - `SharedKey` zeroizes on drop; intermediate IKM buffer in the combiner zeroizes after HKDF
+  - Wire format constants exposed: `HYBRID_PUBKEY_SIZE = 1216`, `HYBRID_CT_SIZE = 1120`, `SHARED_KEY_SIZE = 32`
+  - Fully serializable: `to_bytes()` / `from_bytes()` for both public keys and ciphertexts with strict length validation
+  - Standalone module — not yet wired into encoder/decoder/ratchet/handshake (subsequent sessions)
+  - 10 unit tests covering round-trip, wrong-key behavior, serialization, length validation, combiner determinism and divergence, and FIPS 203 size invariants
+
+- **Hybrid asymmetric encryption** (`crypto/asymmetric.rs`)
+  - `encrypt_hybrid` / `decrypt_hybrid` parallel to existing X25519-only API
+  - `EncryptedDataHybrid` struct with byte-level serialization (`kem_ct (1120) || nonce (12) || aead_ct`)
+  - HKDF-SHA256 with info `ANYHIDE-V3-ASYMMETRIC` derives the AEAD key from the hybrid shared secret
+  - 6 unit tests: round-trip (struct + bytes), wrong-key rejection, serialization, short-input rejection, AEAD tamper detection
+  - Existing X25519-only `encrypt`/`decrypt` functions left untouched for backward compatibility
+
+- **Hybrid multi-recipient encryption** (`crypto/multi_recipient.rs`)
+  - `MultiRecipientDataHybrid` struct with explicit `version: u8 = 2` discriminator
+  - `RecipientKeyHybrid` per-recipient wrap: identifier is the X25519 component (32B), KEM ciphertext is the full hybrid (1120B)
+  - `encrypt_multi_hybrid` / `decrypt_multi_hybrid` mirror the v1 API with `HybridPublicKey` / `HybridSecretKey`
+  - HKDF-SHA256 with salt `ANYHIDE-MULTI-V2` and info `key-encryption` wraps the bulk message key per recipient
+  - `from_bytes` validates the version byte — v1 bytes cannot be parsed as v2 (downgrade-attack defense at the serde layer)
+  - 7 unit tests: single + 3-recipient round-trip, wrong-key, wrong-passphrase, no-recipients error, serialization, cross-version rejection
+  - Existing v1 (X25519-only) struct, encrypt, and decrypt remain byte-compatible
+
+### Dependencies
+
+- Added `ml-kem = "0.3.0"` with `zeroize` and `getrandom` features (RustCrypto pure-Rust implementation)
+
 ## [0.13.0] - 2025-12-23
 
 ### Added

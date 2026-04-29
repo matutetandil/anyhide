@@ -281,6 +281,219 @@ fn decrypt_key_for_recipient(
     Ok(message_key)
 }
 
+// ---- Hybrid post-quantum variant (X25519 + ML-KEM-768) ----
+
+use super::hybrid_kem::{self, HybridCiphertext, HybridPublicKey, HybridSecretKey};
+
+/// HKDF salt for the hybrid multi-recipient scheme.
+const SALT_MULTI_HYBRID: &[u8] = b"ANYHIDE-MULTI-V2";
+
+/// Wire-format version identifier for hybrid multi-recipient payloads.
+const VERSION_HYBRID: u8 = 2;
+
+/// An encrypted message-key wrap for a single recipient under the hybrid scheme.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientKeyHybrid {
+    /// X25519 component of the recipient's hybrid public key (used as identifier).
+    pub recipient_classical: [u8; 32],
+    /// Hybrid KEM ciphertext (X25519 ephemeral pubkey + ML-KEM-768 ciphertext).
+    pub kem_ciphertext: Vec<u8>,
+    /// AEAD nonce (12) + ChaCha20Poly1305 ciphertext of the 32-byte message key.
+    pub encrypted_key: Vec<u8>,
+}
+
+/// Multi-recipient encrypted data using hybrid post-quantum KEMs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRecipientDataHybrid {
+    /// Protocol version (always 2 for this struct).
+    pub version: u8,
+    /// Encrypted message-key wraps for each recipient.
+    pub recipient_keys: Vec<RecipientKeyHybrid>,
+    /// Nonce for the bulk message AEAD.
+    pub message_nonce: [u8; 12],
+    /// Bulk encrypted message body (same for all recipients).
+    pub encrypted_message: Vec<u8>,
+}
+
+impl MultiRecipientDataHybrid {
+    /// Serializes to bytes via bincode.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, MultiRecipientError> {
+        bincode::serialize(self)
+            .map_err(|e| MultiRecipientError::SerializationError(e.to_string()))
+    }
+
+    /// Deserializes from bytes via bincode.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, MultiRecipientError> {
+        let result: Self = bincode::deserialize(data)
+            .map_err(|e| MultiRecipientError::SerializationError(e.to_string()))?;
+        if result.version != VERSION_HYBRID {
+            return Err(MultiRecipientError::InvalidFormat);
+        }
+        Ok(result)
+    }
+}
+
+/// Encrypts data for multiple recipients using hybrid (X25519 + ML-KEM-768) KEMs.
+pub fn encrypt_multi_hybrid(
+    plaintext: &[u8],
+    passphrase: &str,
+    recipients: &[HybridPublicKey],
+) -> Result<MultiRecipientDataHybrid, MultiRecipientError> {
+    if recipients.is_empty() {
+        return Err(MultiRecipientError::NoRecipients);
+    }
+
+    let compressed = compress(plaintext)
+        .map_err(|e| MultiRecipientError::CompressionFailed(e.to_string()))?;
+
+    let passphrase_encrypted = encrypt_symmetric(&compressed, passphrase)
+        .map_err(|e| MultiRecipientError::EncryptionFailed(e.to_string()))?;
+
+    let mut message_key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut message_key);
+
+    let mut message_nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut message_nonce);
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&message_key)
+        .map_err(|_| MultiRecipientError::EncryptionFailed("Invalid key".to_string()))?;
+
+    let encrypted_message = cipher
+        .encrypt(Nonce::from_slice(&message_nonce), passphrase_encrypted.as_ref())
+        .map_err(|e| MultiRecipientError::EncryptionFailed(e.to_string()))?;
+
+    let mut recipient_keys = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        recipient_keys.push(wrap_key_for_hybrid_recipient(&message_key, recipient)?);
+    }
+
+    Ok(MultiRecipientDataHybrid {
+        version: VERSION_HYBRID,
+        recipient_keys,
+        message_nonce,
+        encrypted_message,
+    })
+}
+
+/// Decrypts a hybrid multi-recipient payload as one of the recipients.
+pub fn decrypt_multi_hybrid(
+    data: &MultiRecipientDataHybrid,
+    passphrase: &str,
+    secret: &HybridSecretKey,
+) -> Result<Vec<u8>, MultiRecipientError> {
+    if data.version != VERSION_HYBRID {
+        return Err(MultiRecipientError::InvalidFormat);
+    }
+
+    let our_classical = secret.public_key().to_bytes();
+    let mut classical_id = [0u8; 32];
+    classical_id.copy_from_slice(&our_classical[..32]);
+
+    let our_key_data = data
+        .recipient_keys
+        .iter()
+        .find(|rk| rk.recipient_classical == classical_id)
+        .ok_or(MultiRecipientError::RecipientNotFound)?;
+
+    let message_key = unwrap_key_for_hybrid_recipient(our_key_data, secret)?;
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&message_key)
+        .map_err(|_| MultiRecipientError::DecryptionFailed("Invalid key".to_string()))?;
+
+    let passphrase_encrypted = cipher
+        .decrypt(
+            Nonce::from_slice(&data.message_nonce),
+            data.encrypted_message.as_ref(),
+        )
+        .map_err(|e| MultiRecipientError::DecryptionFailed(e.to_string()))?;
+
+    let compressed = decrypt_symmetric(&passphrase_encrypted, passphrase)
+        .map_err(|e| MultiRecipientError::DecryptionFailed(e.to_string()))?;
+
+    let plaintext = decompress(&compressed)
+        .map_err(|e| MultiRecipientError::CompressionFailed(e.to_string()))?;
+
+    Ok(plaintext)
+}
+
+/// Wraps the bulk message key for a single hybrid recipient.
+fn wrap_key_for_hybrid_recipient(
+    message_key: &[u8; 32],
+    recipient: &HybridPublicKey,
+) -> Result<RecipientKeyHybrid, MultiRecipientError> {
+    let (kem_ct, shared) = hybrid_kem::encapsulate(recipient)
+        .map_err(|e| MultiRecipientError::EncryptionFailed(e.to_string()))?;
+
+    let hk = Hkdf::<Sha256>::new(Some(SALT_MULTI_HYBRID), shared.as_bytes());
+    let mut wrap_key = [0u8; 32];
+    hk.expand(b"key-encryption", &mut wrap_key)
+        .map_err(|_| MultiRecipientError::EncryptionFailed("HKDF failed".to_string()))?;
+
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&wrap_key)
+        .map_err(|_| MultiRecipientError::EncryptionFailed("Invalid key".to_string()))?;
+
+    let encrypted = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), message_key.as_ref())
+        .map_err(|e| MultiRecipientError::EncryptionFailed(e.to_string()))?;
+
+    let mut encrypted_key = Vec::with_capacity(12 + encrypted.len());
+    encrypted_key.extend_from_slice(&nonce_bytes);
+    encrypted_key.extend(encrypted);
+
+    let recipient_bytes = recipient.to_bytes();
+    let mut recipient_classical = [0u8; 32];
+    recipient_classical.copy_from_slice(&recipient_bytes[..32]);
+
+    Ok(RecipientKeyHybrid {
+        recipient_classical,
+        kem_ciphertext: kem_ct.to_bytes().to_vec(),
+        encrypted_key,
+    })
+}
+
+/// Unwraps the bulk message key using our hybrid secret key.
+fn unwrap_key_for_hybrid_recipient(
+    recipient_key: &RecipientKeyHybrid,
+    secret: &HybridSecretKey,
+) -> Result<[u8; 32], MultiRecipientError> {
+    if recipient_key.encrypted_key.len() < 12 {
+        return Err(MultiRecipientError::InvalidFormat);
+    }
+
+    let kem_ct = HybridCiphertext::from_bytes(&recipient_key.kem_ciphertext)
+        .map_err(|_| MultiRecipientError::InvalidFormat)?;
+
+    let shared = hybrid_kem::decapsulate(secret, &kem_ct)
+        .map_err(|e| MultiRecipientError::DecryptionFailed(e.to_string()))?;
+
+    let hk = Hkdf::<Sha256>::new(Some(SALT_MULTI_HYBRID), shared.as_bytes());
+    let mut wrap_key = [0u8; 32];
+    hk.expand(b"key-encryption", &mut wrap_key)
+        .map_err(|_| MultiRecipientError::DecryptionFailed("HKDF failed".to_string()))?;
+
+    let nonce = Nonce::from_slice(&recipient_key.encrypted_key[..12]);
+    let ciphertext = &recipient_key.encrypted_key[12..];
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&wrap_key)
+        .map_err(|_| MultiRecipientError::DecryptionFailed("Invalid key".to_string()))?;
+
+    let decrypted = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| MultiRecipientError::DecryptionFailed(e.to_string()))?;
+
+    if decrypted.len() != 32 {
+        return Err(MultiRecipientError::InvalidFormat);
+    }
+
+    let mut message_key = [0u8; 32];
+    message_key.copy_from_slice(&decrypted);
+
+    Ok(message_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +589,105 @@ mod tests {
         // Should still decrypt correctly
         let decrypted = decrypt_multi(&deserialized, passphrase, recipient.secret_key()).unwrap();
         assert_eq!(plaintext.as_slice(), decrypted.as_slice());
+    }
+
+    // ---- Hybrid PQ tests ----
+
+    #[test]
+    fn hybrid_multi_single_recipient_roundtrip() {
+        let (sk, pk) = hybrid_kem::generate_keypair();
+        let plaintext = b"hybrid hello, single recipient";
+        let passphrase = "test_pass";
+
+        let encrypted = encrypt_multi_hybrid(plaintext, passphrase, &[pk]).unwrap();
+        assert_eq!(encrypted.version, VERSION_HYBRID);
+
+        let decrypted = decrypt_multi_hybrid(&encrypted, passphrase, &sk).unwrap();
+        assert_eq!(plaintext.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn hybrid_multi_three_recipients_each_can_decrypt() {
+        let (sk1, pk1) = hybrid_kem::generate_keypair();
+        let (sk2, pk2) = hybrid_kem::generate_keypair();
+        let (sk3, pk3) = hybrid_kem::generate_keypair();
+
+        let plaintext = b"hybrid message for three recipients";
+        let passphrase = "shared";
+
+        let encrypted = encrypt_multi_hybrid(
+            plaintext,
+            passphrase,
+            &[pk1.clone(), pk2.clone(), pk3.clone()],
+        )
+        .unwrap();
+
+        let d1 = decrypt_multi_hybrid(&encrypted, passphrase, &sk1).unwrap();
+        let d2 = decrypt_multi_hybrid(&encrypted, passphrase, &sk2).unwrap();
+        let d3 = decrypt_multi_hybrid(&encrypted, passphrase, &sk3).unwrap();
+
+        assert_eq!(plaintext.as_slice(), d1.as_slice());
+        assert_eq!(plaintext.as_slice(), d2.as_slice());
+        assert_eq!(plaintext.as_slice(), d3.as_slice());
+    }
+
+    #[test]
+    fn hybrid_multi_wrong_secret_key_is_rejected() {
+        let (_sk, pk) = hybrid_kem::generate_keypair();
+        let (sk_other, _pk_other) = hybrid_kem::generate_keypair();
+        let plaintext = b"only intended recipient";
+        let passphrase = "p";
+
+        let encrypted = encrypt_multi_hybrid(plaintext, passphrase, &[pk]).unwrap();
+        let result = decrypt_multi_hybrid(&encrypted, passphrase, &sk_other);
+
+        assert!(matches!(
+            result,
+            Err(MultiRecipientError::RecipientNotFound)
+        ));
+    }
+
+    #[test]
+    fn hybrid_multi_wrong_passphrase_fails() {
+        let (sk, pk) = hybrid_kem::generate_keypair();
+        let plaintext = b"passphrase guarded";
+
+        let encrypted = encrypt_multi_hybrid(plaintext, "correct", &[pk]).unwrap();
+        let result = decrypt_multi_hybrid(&encrypted, "wrong", &sk);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hybrid_multi_no_recipients_returns_error() {
+        let result = encrypt_multi_hybrid(b"x", "p", &[]);
+        assert!(matches!(result, Err(MultiRecipientError::NoRecipients)));
+    }
+
+    #[test]
+    fn hybrid_multi_serialization_roundtrip() {
+        let (sk, pk) = hybrid_kem::generate_keypair();
+        let plaintext = b"serialize hybrid multi";
+        let passphrase = "p";
+
+        let encrypted = encrypt_multi_hybrid(plaintext, passphrase, &[pk]).unwrap();
+        let bytes = encrypted.to_bytes().unwrap();
+        let restored = MultiRecipientDataHybrid::from_bytes(&bytes).unwrap();
+
+        let decrypted = decrypt_multi_hybrid(&restored, passphrase, &sk).unwrap();
+        assert_eq!(plaintext.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn hybrid_multi_v1_bytes_cannot_be_parsed_as_v2() {
+        // Cross-version tampering: bytes from v1 (X25519) must not deserialize
+        // as v2 (hybrid) — protects against version downgrade attacks at the
+        // serde layer.
+        let recipient = KeyPair::generate();
+        let v1 = encrypt_multi(b"x", "p", &[*recipient.public_key()]).unwrap();
+        let v1_bytes = v1.to_bytes().unwrap();
+
+        let result = MultiRecipientDataHybrid::from_bytes(&v1_bytes);
+        assert!(result.is_err());
     }
 }
