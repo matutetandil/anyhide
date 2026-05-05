@@ -6,8 +6,10 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use anyhide::crypto::{
-    format_mnemonic, key_to_mnemonic, save_private_key_for_contact, save_public_key_for_contact,
-    save_unified_keys_for_contact, HybridKeyPair, KeyPair, SigningKeyPair,
+    format_mnemonic, key_to_mnemonic, save_private_key_for_contact,
+    save_private_key_for_contact_hybrid, save_public_key_for_contact,
+    save_public_key_for_contact_hybrid, save_unified_keys_for_contact,
+    save_unified_keys_for_contact_hybrid, HybridKeyPair, KeyPair, SigningKeyPair,
 };
 
 use super::CommandExecutor;
@@ -185,14 +187,37 @@ impl KeygenCommand {
 
     /// Generate an ephemeral hybrid PQ keypair (no signing keys; ephemeral by definition).
     fn generate_ephemeral_hybrid(&self) -> Result<()> {
-        // Consolidated storage paths (--eph-keys/--eph-pubs/--eph-file) are not
-        // wired up for hybrid yet — the v2 ephemeral_store has parallel _hybrid
-        // functions but the keygen surface for them is a follow-up.
-        if self.eph_keys.is_some() || self.eph_pubs.is_some() || self.eph_file.is_some() {
-            bail!("--hybrid with consolidated ephemeral storage (--eph-keys/--eph-pubs/--eph-file) is not yet supported");
+        // Determine storage format — same flag conventions as the classical
+        // `generate_ephemeral`, but routed through the v2 (`_hybrid`) store API.
+        let has_eph_keys = self.eph_keys.is_some();
+        let has_eph_pubs = self.eph_pubs.is_some();
+        let has_eph_file = self.eph_file.is_some();
+
+        if has_eph_file && (has_eph_keys || has_eph_pubs) {
+            bail!("Cannot use --eph-file with --eph-keys or --eph-pubs");
+        }
+
+        if (has_eph_keys || has_eph_pubs || has_eph_file) && self.contact.is_none() {
+            bail!("--contact is required when using consolidated storage (--eph-keys, --eph-pubs, or --eph-file)");
+        }
+
+        if has_eph_keys != has_eph_pubs {
+            bail!("--eph-keys and --eph-pubs must be used together");
         }
 
         let keypair = HybridKeyPair::generate_ephemeral();
+
+        if let Some(ref eph_file) = self.eph_file {
+            self.save_unified_ephemeral_hybrid(&keypair, eph_file)
+        } else if let (Some(ref eph_keys), Some(ref eph_pubs)) = (&self.eph_keys, &self.eph_pubs) {
+            self.save_separate_ephemeral_hybrid(&keypair, eph_keys, eph_pubs)
+        } else {
+            self.save_individual_ephemeral_hybrid(&keypair)
+        }
+    }
+
+    /// Save hybrid ephemeral keys as individual files (Option 1).
+    fn save_individual_ephemeral_hybrid(&self, keypair: &HybridKeyPair) -> Result<()> {
         keypair
             .save_to_files(&self.output)
             .context("Failed to save hybrid ephemeral key pair")?;
@@ -208,6 +233,100 @@ impl KeygenCommand {
         println!("These are EPHEMERAL hybrid keys for forward secrecy.");
         println!("Share the public key (.pub) with your contact.");
 
+        Ok(())
+    }
+
+    /// Save hybrid ephemeral keys to separate consolidated files (Option 2).
+    ///
+    /// The v2 (`_hybrid`) ephemeral store rejects v1 files at write time via
+    /// `EphemeralStoreError::VersionMismatch`. Existing classical stores are
+    /// not migrated in place; users keep classical and hybrid stores in
+    /// distinct paths.
+    fn save_separate_ephemeral_hybrid(
+        &self,
+        keypair: &HybridKeyPair,
+        eph_keys: &PathBuf,
+        eph_pubs: &PathBuf,
+    ) -> Result<()> {
+        let contact = self.contact.as_ref().unwrap();
+
+        save_private_key_for_contact_hybrid(eph_keys, contact, keypair.secret_key())
+            .context("Failed to save hybrid private key")?;
+
+        save_public_key_for_contact_hybrid(eph_pubs, contact, keypair.public_key())
+            .context("Failed to save hybrid public key")?;
+
+        println!(
+            "Hybrid ephemeral key pair for contact '{}' generated successfully:",
+            contact
+        );
+        println!();
+        println!("  Private keys file: {}", eph_keys.display());
+        println!("  Public keys file:  {}", eph_pubs.display());
+        println!();
+        println!("Your hybrid public key for '{}' (share this with them):", contact);
+        println!();
+        self.print_hybrid_public_key(keypair)?;
+        println!();
+        println!("Now waiting for their hybrid ephemeral public key.");
+        println!("Once received, add it with:");
+        println!("  anyhide keygen --hybrid --ephemeral --eph-pubs {} --contact {} --import <their.pub>",
+            eph_pubs.display(), contact);
+
+        Ok(())
+    }
+
+    /// Save hybrid ephemeral keys to a unified file (Option 3).
+    ///
+    /// The unified store needs *both* my private and the contact's public key.
+    /// Until the contact's real key is imported, we write a throwaway hybrid
+    /// pubkey as the placeholder; it will be replaced when the user runs
+    /// `anyhide eph-import` (or the equivalent flow). Writing zero bytes is
+    /// not viable here — `HybridPublicKey::from_bytes` rejects malformed
+    /// ML-KEM components, so the placeholder must be a real keypair.
+    fn save_unified_ephemeral_hybrid(
+        &self,
+        keypair: &HybridKeyPair,
+        eph_file: &PathBuf,
+    ) -> Result<()> {
+        let contact = self.contact.as_ref().unwrap();
+
+        let placeholder = HybridKeyPair::generate();
+
+        save_unified_keys_for_contact_hybrid(
+            eph_file,
+            contact,
+            keypair.secret_key(),
+            placeholder.public_key(),
+        )
+        .context("Failed to save hybrid key pair")?;
+
+        println!(
+            "Hybrid ephemeral key pair for contact '{}' generated successfully:",
+            contact
+        );
+        println!();
+        println!("  Storage file: {}", eph_file.display());
+        println!();
+        println!("Your hybrid public key for '{}' (share this with them):", contact);
+        println!();
+        self.print_hybrid_public_key(keypair)?;
+        println!();
+        println!("IMPORTANT: You need to import their hybrid public key.");
+        println!("Use: anyhide eph-import --eph-file {} --contact {} <their.pub>",
+            eph_file.display(), contact);
+
+        Ok(())
+    }
+
+    /// Print the hybrid public key in PEM format for sharing.
+    fn print_hybrid_public_key(&self, keypair: &HybridKeyPair) -> Result<()> {
+        use anyhide::crypto::encode_hybrid_public_key_pem;
+        // Pass the keypair's KeyType so the encoder produces the
+        // EPHEMERAL HYBRID PEM headers (vs the long-term HYBRID headers).
+        let pem = encode_hybrid_public_key_pem(keypair.public_key(), keypair.key_type())
+            .context("Failed to encode hybrid public key as PEM")?;
+        println!("{}", pem);
         Ok(())
     }
 

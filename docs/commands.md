@@ -41,16 +41,24 @@ anyhide keygen -o alice --ephemeral
 # Ephemeral hybrid keys (individual files)
 anyhide keygen --hybrid -o alice --ephemeral
 # Creates: alice.pub, alice.key (with EPHEMERAL HYBRID PEM headers).
-# Note: hybrid + consolidated stores (--eph-file / --eph-keys) is not yet
-# wired into the CLI; the library API exists in crypto::ephemeral_store.
 
-# Ephemeral keys (consolidated separate files)
+# Ephemeral keys (consolidated separate files) — classical
 anyhide keygen --ephemeral --eph-keys keys.eph.key --eph-pubs keys.eph.pub --contact bob
-# Adds/updates contact "bob" in both JSON files
+# Adds/updates contact "bob" in both JSON files (version 1)
 
-# Ephemeral keys (unified file)
+# Ephemeral hybrid keys (consolidated separate files) — version 2 stores
+anyhide keygen --hybrid --ephemeral --eph-keys keys.eph.key --eph-pubs keys.eph.pub --contact bob
+# Adds/updates contact "bob" in both JSON files with version: 2 markers.
+# The store rejects writes from the classical path and vice versa, so v1
+# and v2 stores live in distinct paths.
+
+# Ephemeral keys (unified file) — classical
 anyhide keygen --ephemeral --eph-file contacts.eph --contact bob
 # Adds/updates contact "bob" with my_private and placeholder their_public
+
+# Ephemeral hybrid keys (unified file) — version 2 store
+anyhide keygen --hybrid --ephemeral --eph-file contacts.eph --contact bob
+# Same UX as the classical unified store but with hybrid keys and version: 2.
 ```
 
 ## Encode

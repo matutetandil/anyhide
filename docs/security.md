@@ -157,7 +157,6 @@ Unlike anyhide codes, the chat protocol forced a hard break at v2:
 
 - **Forward-secrecy ratchet on encoded anyhide codes** (`encode --ratchet`) is rejected with `EncoderError::RatchetUnsupportedForHybrid` for hybrid recipients. The encoder's `EncodedMessage.next_keypair` is X25519-only; emitting a hybrid ephemeral here would misrepresent the ratchet shape. Classical ratchet semantics are unchanged.
 - **BIP39 mnemonic backup** is classical-only. The hybrid secret is 96 bytes (32 B X25519 + 64 B ML-KEM seed), and the standard 24-word BIP39 mnemonic encodes 32-byte secrets. A 27-word or custom scheme for hybrid keys is a follow-up.
-- **Consolidated ephemeral key store CLI flags** (`keygen --hybrid --ephemeral --eph-file …`) are not yet wired. The library API exists (`*_for_contact_hybrid` family in `crypto/ephemeral_store.rs`); only the CLI surface is pending.
 - **Ed25519 signing identities** continue as classical. Authentication of the sender does not benefit from hybrid PQ in the same way confidentiality does — a signature does not protect past messages from future cryptanalysis (it only commits the sender at signing time).
 
 ### Key code references

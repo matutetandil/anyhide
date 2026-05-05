@@ -152,8 +152,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`keygen --hybrid` flag** (`commands/keygen.rs`)
   - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
   - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake
-  - Combines with `--ephemeral` to generate a hybrid ephemeral keypair (file mode only; consolidated `--eph-keys`/`--eph-pubs`/`--eph-file` paths for hybrid are a follow-up)
+  - Combines with `--ephemeral` for a hybrid ephemeral keypair, written either as individual files (default) or to a v2 consolidated store (see below)
   - `--show-mnemonic` is silently skipped for hybrid keys (BIP39 backup is built around 32-byte secrets; the 96-byte hybrid secret needs a different scheme — deferred to a future release)
+
+- **Hybrid PQ consolidated ephemeral storage via the `keygen` CLI** (`commands/keygen.rs`)
+  - `--hybrid --ephemeral --eph-keys <path> --eph-pubs <path> --contact <name>` now wires through to `save_private_key_for_contact_hybrid` / `save_public_key_for_contact_hybrid` (separate v2 stores)
+  - `--hybrid --ephemeral --eph-file <path> --contact <name>` now wires through to `save_unified_keys_for_contact_hybrid` (unified v2 store). The placeholder peer pubkey is a throwaway hybrid keypair rather than zero bytes, since `HybridPublicKey::from_bytes` rejects malformed ML-KEM components
+  - v2 stores embed `"version": 2` and refuse v1 files at write time with `EphemeralStoreError::VersionMismatch { expected: 2, found: 1 }` — classical and hybrid stores live in distinct paths, no in-place migration
+  - v2 stores carry the `EPHEMERAL HYBRID` PEM header for printed pubkeys (vs `EPHEMERAL` for classical); peers exchange their stores out of band as before
+  - The CLI surface for hybrid finally matches the classical surface: long-term, individual ephemeral, separate consolidated, and unified consolidated all work with `--hybrid`. The library API for hybrid stores existed since session 38; this commit only wires the CLI
 
 ### Dependencies
 
