@@ -4,12 +4,15 @@ Real-time encrypted chat using Tor hidden services. Both peers are equal - no se
 
 > **Security Warning:** Arti's onion services are experimental and not as secure as C-Tor. Do not use for highly sensitive communications.
 
+> **Post-Quantum Note:** The chat protocol was hard-bumped to v2 in v0.14 and now requires hybrid post-quantum keys (X25519 + ML-KEM-768) for the encryption identity. v2 peers refuse v1 connections and vice versa. If you migrated from a pre-v0.14 install, regenerate your encryption identity with `anyhide keygen --hybrid` and re-share your QR with peers. Signing keys remain classical Ed25519. See [Security → Post-Quantum Hybrid Encryption](security.md#post-quantum-hybrid-encryption) for the threat model.
+
 ## Setup (one time)
 
 ```bash
-# 1. Generate your keys (encryption + signing)
-anyhide keygen -o mykeys
-anyhide keygen -o mykeys --signing
+# 1. Generate your keys (hybrid PQ encryption + classical Ed25519 signing)
+anyhide keygen --hybrid -o mykeys
+# Creates mykeys.pub / mykeys.key (HYBRID PEM headers) plus the
+# Ed25519 signing pair mykeys.sign.pub / mykeys.sign.key.
 
 # 2. Initialize your chat identity (bootstraps Tor, shows your .onion)
 anyhide chat init -k mykeys -s mykeys.sign
@@ -17,6 +20,8 @@ anyhide chat init -k mykeys -s mykeys.sign
 
 # 3. Add a contact (you need their .onion address and public keys)
 anyhide chat add bob <bob.onion> --key bob.pub --sign-key bob.sign.pub
+# bob.pub must be a hybrid PEM (BEGIN ANYHIDE HYBRID PUBLIC KEY).
+# Classical pubkeys are rejected with a message pointing at `keygen --hybrid`.
 ```
 
 ## Start Chatting

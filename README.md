@@ -38,9 +38,10 @@ Both parties share a file (ANY file). The sender hides data by finding byte patt
 
 - **Any carrier**: text, images, audio, video, PDFs, executables, archives
 - **Any payload**: text messages, binary files, documents, archives
-- **Dual-layer encryption**: Symmetric (ChaCha20) + Asymmetric (X25519)
+- **Dual-layer encryption**: Symmetric (ChaCha20) + Asymmetric (X25519, or optional **post-quantum hybrid** X25519 + ML-KEM-768)
+- **Post-quantum hybrid** (opt-in via `keygen --hybrid`): protects against harvest-now-decrypt-later attacks with ML-KEM-768 layered on top of X25519
 - **Forward secrecy ratchet**: Key rotation per message
-- **P2P Chat over Tor**: Real-time encrypted chat via Tor hidden services
+- **P2P Chat over Tor**: Real-time encrypted chat via Tor hidden services (always post-quantum hybrid since v0.14)
 - **Duress password**: Two messages, two passphrases - reveal the decoy under coercion
 - **Multi-carrier encoding**: Multiple files as carrier, order is an additional secret
 - **Message signing**: Ed25519 signatures for sender authentication
@@ -75,6 +76,21 @@ anyhide encode -c carrier.txt -m "secret" -p "pass123" --their-key recipient.pub
 # Decode a message
 anyhide decode --code "AwNhYm..." -c carrier.txt -p "pass123" --my-key recipient.key
 ```
+
+## Going Post-Quantum
+
+For protection against future quantum computers (and against adversaries recording traffic today to decrypt it later), generate a **hybrid** keypair. The CLI auto-detects the key flavor from the PEM header — no special flags needed at encode / decode time.
+
+```bash
+# Generate a hybrid X25519 + ML-KEM-768 keypair
+anyhide keygen --hybrid -o mykeys
+
+# Encode and decode work the same — the wire format is selected automatically
+anyhide encode -c carrier.txt -m "secret" -p "pass123" --their-key recipient.pub
+anyhide decode --code "AHV7..." -c carrier.txt -p "pass123" --my-key recipient.key
+```
+
+Existing classical (v6) codes keep working byte-identically. Hybrid (v7) codes are larger (~1.1 KB extra per code) but remain confidential even if X25519 or ML-KEM is broken in the future. See [Security Properties → Post-Quantum Hybrid Encryption](docs/security.md#post-quantum-hybrid-encryption) for the threat model and tradeoffs.
 
 ## Documentation
 

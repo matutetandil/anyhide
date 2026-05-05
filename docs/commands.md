@@ -9,24 +9,40 @@ anyhide keygen [OPTIONS] -o <name>
 
 Options:
   -o, --output <PATH>      Output path for keys (default: anyhide)
+  --hybrid                 Generate post-quantum hybrid keys (X25519 + ML-KEM-768)
   --ephemeral              Generate ephemeral keys for forward secrecy
-  --show-mnemonic          Show 24-word backup phrases (long-term keys only)
+  --show-mnemonic          Show 24-word backup phrases (classical long-term keys only)
   --contact <NAME>         Contact name (required for consolidated storage)
   --eph-keys <PATH>        Path to .eph.key file (consolidated private keys)
   --eph-pubs <PATH>        Path to .eph.pub file (consolidated public keys)
   --eph-file <PATH>        Path to .eph file (unified storage)
 
-# Long-term keys (default)
+# Long-term keys (default — classical X25519)
 anyhide keygen -o mykeys
 
-# Long-term keys with mnemonic backup phrases
+# Long-term hybrid post-quantum keys (X25519 + ML-KEM-768)
+anyhide keygen --hybrid -o mykeys
+# Required for the chat protocol (which is hybrid PQ since v0.14).
+# For anyhide codes, hybrid is opt-in: encode / decode auto-detect the flavor
+# from the PEM header, so no extra flags are needed at use time.
+# Creates: mykeys.pub, mykeys.key (with HYBRID PEM headers), plus the
+# Ed25519 mykeys.sign.pub / mykeys.sign.key signing pair.
+
+# Long-term keys with mnemonic backup phrases (classical only)
 anyhide keygen -o mykeys --show-mnemonic
-# Shows 24-word phrases for both encryption and signing keys
-# Creates: mykeys.pub, mykeys.key, mykeys.sign.pub, mykeys.sign.key
+# Shows 24-word phrases for both encryption and signing keys.
+# Note: --show-mnemonic is silently skipped when combined with --hybrid;
+# BIP39 backup for the 96-byte hybrid secret is a follow-up.
 
 # Ephemeral keys (individual files)
 anyhide keygen -o alice --ephemeral
 # Creates: alice.pub, alice.key (with EPHEMERAL PEM headers)
+
+# Ephemeral hybrid keys (individual files)
+anyhide keygen --hybrid -o alice --ephemeral
+# Creates: alice.pub, alice.key (with EPHEMERAL HYBRID PEM headers).
+# Note: hybrid + consolidated stores (--eph-file / --eph-keys) is not yet
+# wired into the CLI; the library API exists in crypto::ephemeral_store.
 
 # Ephemeral keys (consolidated separate files)
 anyhide keygen --ephemeral --eph-keys keys.eph.key --eph-pubs keys.eph.pub --contact bob
@@ -76,6 +92,15 @@ Other options:
   -v, --verbose            Show details
 ```
 
+The wire format (classical v6 vs hybrid post-quantum v7) is selected automatically
+based on the recipient PEM header. A `BEGIN ANYHIDE PUBLIC KEY` produces a v6 code;
+a `BEGIN ANYHIDE HYBRID PUBLIC KEY` produces a v7 code. Existing v6 codes remain
+byte-identical, so peers who have not migrated to PQ keep working unchanged.
+
+`--ratchet` is rejected for hybrid recipients (the encoder's `next_keypair` is
+X25519-only). Encode without `--ratchet` for hybrid, or stick to classical keys
+for ratcheted exchanges.
+
 ## Decode
 
 ```bash
@@ -107,6 +132,11 @@ Other options:
   -o, --output <PATH>      Output file (required for binary)
   -v, --verbose            Show details
 ```
+
+The decoder auto-detects the user's key flavor from the PEM header and the code's
+wire format from its leading bytes. Mismatches (v7 code + classical secret, or v6
+code + hybrid secret) flow through the never-fail decoder and yield deterministic
+garbage — there is no error signal an attacker could probe to learn the format.
 
 ## Fingerprint
 
