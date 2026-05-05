@@ -21,3 +21,6 @@ CLAUDE.local.md
 # OS files
 .DS_Store
 Thumbs.db
+
+# Dev.to series drafts (local only, not part of the product)
+/devto/

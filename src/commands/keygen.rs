@@ -7,7 +7,7 @@ use clap::Args;
 
 use anyhide::crypto::{
     format_mnemonic, key_to_mnemonic, save_private_key_for_contact, save_public_key_for_contact,
-    save_unified_keys_for_contact, KeyPair, SigningKeyPair,
+    save_unified_keys_for_contact, HybridKeyPair, KeyPair, SigningKeyPair,
 };
 
 use super::CommandExecutor;
@@ -43,18 +43,38 @@ pub struct KeygenCommand {
     /// Write these down for paper backup. Not available for ephemeral keys.
     #[arg(long)]
     pub show_mnemonic: bool,
+
+    /// Generate hybrid post-quantum encryption keys (X25519 + ML-KEM-768).
+    ///
+    /// Required for chat in protocol v2 — classical X25519 keys are no longer
+    /// accepted by the chat handshake. Signing keys remain Ed25519.
+    #[arg(long)]
+    pub hybrid: bool,
 }
 
 impl CommandExecutor for KeygenCommand {
     fn execute(&self) -> Result<()> {
-        // Warn if --show-mnemonic is used with --ephemeral
         if self.show_mnemonic && self.ephemeral {
             eprintln!("WARNING: --show-mnemonic is ignored for ephemeral keys.");
             eprintln!("         Ephemeral keys rotate per message and should not be backed up.");
             eprintln!();
         }
 
-        if self.ephemeral {
+        if self.show_mnemonic && self.hybrid {
+            // BIP39 mnemonic backup is built around 32-byte X25519 secrets;
+            // the hybrid secret is 96 bytes (32B X25519 || 64B ML-KEM seed)
+            // and would need a different backup scheme. Defer to a future
+            // session.
+            eprintln!("WARNING: --show-mnemonic is not yet supported for --hybrid keys.");
+            eprintln!("         Hybrid keys are 96 bytes; BIP39 backup will land in a future release.");
+            eprintln!();
+        }
+
+        if self.hybrid && self.ephemeral {
+            self.generate_ephemeral_hybrid()
+        } else if self.hybrid {
+            self.generate_long_term_hybrid()
+        } else if self.ephemeral {
             self.generate_ephemeral()
         } else {
             self.generate_long_term()
@@ -112,6 +132,81 @@ impl KeygenCommand {
         if self.show_mnemonic {
             self.show_mnemonic_backup(&keypair, &signing_keypair)?;
         }
+
+        Ok(())
+    }
+
+    /// Generate long-term hybrid PQ encryption keys + Ed25519 signing keys.
+    ///
+    /// Encryption uses X25519 + ML-KEM-768 (1216-byte pubkey, 96-byte secret seed).
+    /// Signing remains Ed25519 — the post-quantum migration covers confidentiality
+    /// only; signature-based authentication is a separate concern.
+    fn generate_long_term_hybrid(&self) -> Result<()> {
+        let keypair = HybridKeyPair::generate();
+        keypair
+            .save_to_files(&self.output)
+            .context("Failed to save hybrid encryption key pair")?;
+
+        let signing_keypair = SigningKeyPair::generate();
+        signing_keypair
+            .save_to_files(&self.output)
+            .context("Failed to save signing key pair")?;
+
+        let pub_path = self.output.with_extension("pub");
+        let key_path = self.output.with_extension("key");
+        let sign_pub_path = {
+            let mut p = self.output.as_os_str().to_os_string();
+            p.push(".sign.pub");
+            PathBuf::from(p)
+        };
+        let sign_key_path = {
+            let mut p = self.output.as_os_str().to_os_string();
+            p.push(".sign.key");
+            PathBuf::from(p)
+        };
+
+        println!("Hybrid PQ key pairs generated successfully:");
+        println!();
+        println!("Encryption keys (X25519 + ML-KEM-768):");
+        println!("  Public key:  {}", pub_path.display());
+        println!("  Private key: {}", key_path.display());
+        println!();
+        println!("Signing keys (Ed25519):");
+        println!("  Public key:  {}", sign_pub_path.display());
+        println!("  Private key: {}", sign_key_path.display());
+        println!();
+        println!("Use these keys for chat (protocol v2): `anyhide chat init -n <nick> -k {} -s {}`",
+            self.output.display(), self.output.display());
+        println!();
+        println!("Keep your private keys (.key, .sign.key) secret and secure.");
+
+        Ok(())
+    }
+
+    /// Generate an ephemeral hybrid PQ keypair (no signing keys; ephemeral by definition).
+    fn generate_ephemeral_hybrid(&self) -> Result<()> {
+        // Consolidated storage paths (--eph-keys/--eph-pubs/--eph-file) are not
+        // wired up for hybrid yet — the v2 ephemeral_store has parallel _hybrid
+        // functions but the keygen surface for them is a follow-up.
+        if self.eph_keys.is_some() || self.eph_pubs.is_some() || self.eph_file.is_some() {
+            bail!("--hybrid with consolidated ephemeral storage (--eph-keys/--eph-pubs/--eph-file) is not yet supported");
+        }
+
+        let keypair = HybridKeyPair::generate_ephemeral();
+        keypair
+            .save_to_files(&self.output)
+            .context("Failed to save hybrid ephemeral key pair")?;
+
+        let pub_path = self.output.with_extension("pub");
+        let key_path = self.output.with_extension("key");
+
+        println!("Hybrid ephemeral key pair generated successfully:");
+        println!();
+        println!("  Public key:  {}", pub_path.display());
+        println!("  Private key: {}", key_path.display());
+        println!();
+        println!("These are EPHEMERAL hybrid keys for forward secrecy.");
+        println!("Share the public key (.pub) with your contact.");
 
         Ok(())
     }

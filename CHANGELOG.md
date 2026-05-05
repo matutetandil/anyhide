@@ -117,6 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The function emits a stderr note recommending `--from-qr` whenever it succeeds — typing 2432 hex chars on a CLI is impractical, QR is the path
   - `parse_ephemeral_from_qr` (preferred path) decodes hybrid pubkey directly from QR bytes — no UX change for users on this path
 
+- **`keygen --hybrid` flag** (`commands/keygen.rs`)
+  - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
+  - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake
+  - Combines with `--ephemeral` to generate a hybrid ephemeral keypair (file mode only; consolidated `--eph-keys`/`--eph-pubs`/`--eph-file` paths for hybrid are a follow-up)
+  - `--show-mnemonic` is silently skipped for hybrid keys (BIP39 backup is built around 32-byte secrets; the 96-byte hybrid secret needs a different scheme — deferred to a future release)
+
 ### Dependencies
 
 - Added `ml-kem = "0.3.0"` with `zeroize` and `getrandom` features (RustCrypto pure-Rust implementation)
