@@ -26,7 +26,7 @@
 use hkdf::Hkdf;
 use ml_kem::kem::{Encapsulate, TryDecapsulate};
 use ml_kem::{
-    Ciphertext as MlKemCiphertext, EncapsulationKey as MlKemEk, Kem, KeyExport, MlKem768,
+    Ciphertext as MlKemCiphertext, EncapsulationKey as MlKemEk, Kem, KeyExport, MlKem768, Seed,
 };
 use rand::rngs::OsRng;
 use sha2::Sha256;
@@ -42,6 +42,21 @@ pub const CLASSICAL_PUBKEY_SIZE: usize = 32;
 
 /// Size of the ML-KEM-768 encapsulation key (bytes).
 pub const PQ_PUBKEY_SIZE: usize = 1184;
+
+/// Size of the X25519 secret key component (bytes).
+pub const CLASSICAL_SECRET_SIZE: usize = 32;
+
+/// Size of the ML-KEM-768 secret key seed (bytes).
+///
+/// ML-KEM-768 keys generated via the FIPS 203 keygen procedure can be
+/// re-derived from a 64-byte seed (`d || z`). Storing the seed instead of
+/// the expanded form keeps the secret key compact and ensures the saved
+/// key is always a valid generator output (the deprecated expanded form
+/// would require validation on load).
+pub const PQ_SECRET_SEED_SIZE: usize = 64;
+
+/// Size of the serialized hybrid secret key (bytes): 32B X25519 || 64B ML-KEM seed.
+pub const HYBRID_SECRET_KEY_SIZE: usize = CLASSICAL_SECRET_SIZE + PQ_SECRET_SEED_SIZE;
 
 /// Size of the X25519 ephemeral public key in a ciphertext (bytes).
 pub const CLASSICAL_CT_SIZE: usize = 32;
@@ -63,6 +78,9 @@ pub const SHARED_KEY_SIZE: usize = 32;
 pub enum HybridKemError {
     #[error("Invalid public key encoding")]
     InvalidPublicKey,
+
+    #[error("Invalid secret key encoding")]
+    InvalidSecretKey,
 
     #[error("Invalid ciphertext encoding")]
     InvalidCiphertext,
@@ -145,6 +163,47 @@ impl HybridSecretKey {
         let classical = X25519PublicKey::from(&self.classical);
         let pq = self.pq.encapsulation_key().clone();
         HybridPublicKey { classical, pq }
+    }
+
+    /// Serializes the hybrid secret key to bytes.
+    ///
+    /// Format: classical X25519 (32) || ML-KEM-768 seed (64) = 96 bytes.
+    ///
+    /// The post-quantum component is exported as its 64-byte seed (`d || z`)
+    /// rather than the expanded form. Keys generated via [`generate_keypair`]
+    /// always retain their seed, so this serialization is always available;
+    /// keys reconstructed from the deprecated expanded form would panic on
+    /// `to_bytes`, but Anyhide does not use that path.
+    pub fn to_bytes(&self) -> [u8; HYBRID_SECRET_KEY_SIZE] {
+        let mut out = [0u8; HYBRID_SECRET_KEY_SIZE];
+        out[..CLASSICAL_SECRET_SIZE].copy_from_slice(&self.classical.to_bytes());
+        let pq_seed: Seed = self.pq.to_bytes();
+        out[CLASSICAL_SECRET_SIZE..].copy_from_slice(pq_seed.as_slice());
+        out
+    }
+
+    /// Deserializes a hybrid secret key from bytes.
+    ///
+    /// Reconstructs the ML-KEM decapsulation key from the stored seed via
+    /// `DecapsulationKey::from_seed`, which is the FIPS 203 generator and
+    /// cannot fail to produce a valid key.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, HybridKemError> {
+        if data.len() != HYBRID_SECRET_KEY_SIZE {
+            return Err(HybridKemError::InvalidLength {
+                expected: HYBRID_SECRET_KEY_SIZE,
+                actual: data.len(),
+            });
+        }
+
+        let mut classical_bytes = [0u8; CLASSICAL_SECRET_SIZE];
+        classical_bytes.copy_from_slice(&data[..CLASSICAL_SECRET_SIZE]);
+        let classical = X25519Secret::from(classical_bytes);
+
+        let seed = Seed::try_from(&data[CLASSICAL_SECRET_SIZE..])
+            .map_err(|_| HybridKemError::InvalidSecretKey)?;
+        let pq = ml_kem::DecapsulationKey::<MlKem768>::from_seed(seed);
+
+        Ok(Self { classical, pq })
     }
 }
 
@@ -390,10 +449,45 @@ mod tests {
     fn size_constants_match_fips203_ml_kem_768_spec() {
         assert_eq!(CLASSICAL_PUBKEY_SIZE, 32);
         assert_eq!(PQ_PUBKEY_SIZE, 1184);
+        assert_eq!(CLASSICAL_SECRET_SIZE, 32);
+        assert_eq!(PQ_SECRET_SEED_SIZE, 64);
         assert_eq!(CLASSICAL_CT_SIZE, 32);
         assert_eq!(PQ_CT_SIZE, 1088);
         assert_eq!(HYBRID_PUBKEY_SIZE, 1216);
+        assert_eq!(HYBRID_SECRET_KEY_SIZE, 96);
         assert_eq!(HYBRID_CT_SIZE, 1120);
         assert_eq!(SHARED_KEY_SIZE, 32);
+    }
+
+    #[test]
+    fn secret_key_serialization_roundtrip_recovers_decapsulation() {
+        let (sk, pk) = generate_keypair();
+        let bytes = sk.to_bytes();
+        assert_eq!(bytes.len(), HYBRID_SECRET_KEY_SIZE);
+
+        let restored = HybridSecretKey::from_bytes(&bytes).unwrap();
+
+        // Restored key derives the same public key
+        assert_eq!(restored.public_key().to_bytes(), pk.to_bytes());
+
+        // Restored key decapsulates correctly
+        let (ct, sender_key) = encapsulate(&pk).unwrap();
+        let recovered = decapsulate(&restored, &ct).unwrap();
+        assert_eq!(sender_key.as_bytes(), recovered.as_bytes());
+    }
+
+    #[test]
+    fn secret_key_from_bytes_rejects_wrong_length() {
+        let too_short = vec![0u8; HYBRID_SECRET_KEY_SIZE - 1];
+        let too_long = vec![0u8; HYBRID_SECRET_KEY_SIZE + 1];
+
+        assert!(matches!(
+            HybridSecretKey::from_bytes(&too_short),
+            Err(HybridKemError::InvalidLength { .. })
+        ));
+        assert!(matches!(
+            HybridSecretKey::from_bytes(&too_long),
+            Err(HybridKemError::InvalidLength { .. })
+        ));
     }
 }

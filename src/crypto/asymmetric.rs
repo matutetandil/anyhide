@@ -222,9 +222,9 @@ impl From<HybridKemError> for AsymmetricError {
                 AsymmetricError::DecryptionFailed("Hybrid KEM decapsulation failed".to_string())
             }
             HybridKemError::KeyDerivationFailed => AsymmetricError::KeyDerivationFailed,
-            HybridKemError::InvalidCiphertext | HybridKemError::InvalidPublicKey => {
-                AsymmetricError::CiphertextTooShort
-            }
+            HybridKemError::InvalidCiphertext
+            | HybridKemError::InvalidPublicKey
+            | HybridKemError::InvalidSecretKey => AsymmetricError::CiphertextTooShort,
             HybridKemError::InvalidLength { .. } => AsymmetricError::CiphertextTooShort,
         }
     }

@@ -36,6 +36,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 7 unit tests: single + 3-recipient round-trip, wrong-key, wrong-passphrase, no-recipients error, serialization, cross-version rejection
   - Existing v1 (X25519-only) struct, encrypt, and decrypt remain byte-compatible
 
+- **Hybrid secret key serialization** (`crypto/hybrid_kem.rs`)
+  - `HybridSecretKey::to_bytes()` / `from_bytes()` (96 bytes: 32B X25519 || 64B ML-KEM seed)
+  - Uses ML-KEM `KeyExport` trait to round-trip through the FIPS 203 seed (`d || z`) rather than the deprecated 2,400-byte expanded form
+  - `HybridKemError::InvalidSecretKey` variant for length/decode failures
+  - Constants exposed: `HYBRID_SECRET_KEY_SIZE`, `CLASSICAL_SECRET_SIZE`, `PQ_SECRET_SEED_SIZE`
+  - 2 additional unit tests: roundtrip recovers decapsulation, length validation
+
+- **Hybrid keypair PEM** (`crypto/keys.rs`)
+  - `HybridKeyPair` struct paralleling `KeyPair` (`generate()`, `generate_ephemeral()`, `public_key()`, `secret_key()`, `save_to_files()`, `load_from_files()`)
+  - `KeyType::HybridV1` and `KeyType::EphemeralHybridV1` variants; `is_hybrid()` and `is_ephemeral_kind()` predicates
+  - PEM headers: `-----BEGIN ANYHIDE HYBRID PUBLIC/PRIVATE KEY-----` and `EPHEMERAL HYBRID` variants
+  - `encode_hybrid_public_key_pem` / `encode_hybrid_secret_key_pem` and matching `decode_*` and `load_*` helpers
+  - `decode_public_key_pem_with_type` (classical) now refuses hybrid PEMs explicitly with a clear error instead of failing mid-base64 decode
+  - `decode_hybrid_public_key_pem` (hybrid) symmetrically refuses classical PEMs
+  - `detect_key_type` updated to distinguish all four variants (hybrid checked before classical because hybrid PEMs contain the `EPHEMERAL` substring)
+  - 10 additional unit tests covering generation, PEM round-trip (long-term + ephemeral), file save/load, cross-type rejection, and `detect_key_type` discrimination
+
+- **Hybrid ephemeral key store** (`crypto/ephemeral_store.rs`)
+  - Parallel `_hybrid` functions for all three formats: `.eph.key` (private only), `.eph.pub` (public only), `.eph` (unified)
+  - New JSON structs (`PrivateKeyEntryHybrid`, `PublicKeyEntryHybrid`, `UnifiedEntryHybrid`, `*StoreHybrid`) carry `version: u8 = 2`
+  - `ContactKeysHybrid` mirrors `ContactKeys` with `HybridSecretKey` / `HybridPublicKey`
+  - `generate_and_save_ephemeral_for_contact_hybrid` generates a hybrid keypair on the fly
+  - All v2 functions (`*_hybrid`) probe the JSON `version` field before parsing and reject v1 stores with `EphemeralStoreError::VersionMismatch { expected: 2, found: 1 }`; v1 stores are never silently upgraded
+  - File extensions are unchanged (`.eph`, `.eph.key`, `.eph.pub`) — v1 and v2 are distinguished by the embedded version field, not by filename
+  - `EphemeralStoreError::HybridKemError` variant for KEM-level errors during decode
+  - 9 additional unit tests covering each format round-trip, multiple contacts, public-key update, generate-and-save, contact-not-found, v2 rejecting v1, and v2 files serializing `"version": 2`
+
 ### Dependencies
 
 - Added `ml-kem = "0.3.0"` with `zeroize` and `getrandom` features (RustCrypto pure-Rust implementation)
