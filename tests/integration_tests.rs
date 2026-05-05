@@ -1355,3 +1355,100 @@ fn test_multi_carrier_permutation_security() {
         assert_ne!(normalize_whitespace(&decoded_wrong.message), normalize_whitespace(message), "Wrong order should produce garbage");
     }
 }
+
+mod hybrid_dispatcher {
+    use anyhide::crypto::{detect_wire_format, HybridKeyPair, KeyPair, WireFormat};
+    use anyhide::{
+        decode, decode_bytes_with_carrier_hybrid, decode_hybrid, encode, encode_bytes_with_carrier_hybrid,
+        encode_hybrid, Carrier,
+    };
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    /// End-to-end hybrid roundtrip with a text carrier.
+    #[test]
+    fn hybrid_roundtrip_text_carrier() {
+        let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+        let message = "ama parque";
+        let passphrase = "pq-roundtrip";
+
+        let keypair = HybridKeyPair::generate();
+
+        let encoded = encode_hybrid(carrier, message, passphrase, keypair.public_key()).unwrap();
+        let decoded = decode_hybrid(&encoded.code, carrier, passphrase, keypair.secret_key());
+
+        assert!(decoded.message.to_lowercase().contains("ama"));
+        assert!(decoded.message.to_lowercase().contains("parque"));
+    }
+
+    /// End-to-end hybrid roundtrip for binary payloads via the bytes API.
+    #[test]
+    fn hybrid_roundtrip_binary_payload() {
+        let carrier_bytes: Vec<u8> = (0u8..=255).cycle().take(2048).collect();
+        let carrier = Carrier::from_bytes(carrier_bytes);
+        let payload: Vec<u8> = (0u8..=255).collect();
+        let passphrase = "pq-binary";
+
+        let keypair = HybridKeyPair::generate();
+
+        let encoded =
+            encode_bytes_with_carrier_hybrid(&carrier, &payload, passphrase, keypair.public_key())
+                .unwrap();
+        let decoded =
+            decode_bytes_with_carrier_hybrid(&encoded.code, &carrier, passphrase, keypair.secret_key());
+
+        assert_eq!(decoded.data, payload);
+    }
+
+    /// Confirms the hybrid encoder always emits the v7 magic prefix.
+    #[test]
+    fn hybrid_encode_emits_v7_prefix_via_lib_api() {
+        let carrier = "Amanda al parque";
+        let message = "ama";
+        let passphrase = "p";
+
+        let keypair = HybridKeyPair::generate();
+        let encoded = encode_hybrid(carrier, message, passphrase, keypair.public_key()).unwrap();
+
+        let raw = BASE64.decode(&encoded.code).unwrap();
+        assert_eq!(detect_wire_format(&raw), WireFormat::HybridV7);
+    }
+
+    /// Confirms the classical encoder never emits the v7 magic prefix —
+    /// existing v6 codes remain byte-compatible after the dispatcher.
+    #[test]
+    fn classical_encode_remains_v6_via_lib_api() {
+        let carrier = "Amanda al parque";
+        let message = "ama";
+        let passphrase = "p";
+
+        let keypair = KeyPair::generate();
+        let encoded = encode(carrier, message, passphrase, keypair.public_key()).unwrap();
+
+        let raw = BASE64.decode(&encoded.code).unwrap();
+        assert_eq!(detect_wire_format(&raw), WireFormat::ClassicalV6);
+    }
+
+    /// Wire-format / key-flavor mismatches go through the never-fail decoder
+    /// and yield deterministic garbage rather than panics or leaks.
+    #[test]
+    fn cross_format_decode_returns_garbage() {
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama parque";
+        let passphrase = "p";
+
+        let classical = KeyPair::generate();
+        let hybrid = HybridKeyPair::generate();
+
+        // v6 code + hybrid secret -> garbage
+        let v6 = encode(carrier, message, passphrase, classical.public_key()).unwrap();
+        let garbled = decode_hybrid(&v6.code, carrier, passphrase, hybrid.secret_key());
+        let lower = garbled.message.to_lowercase();
+        assert!(!(lower.contains("ama") && lower.contains("parque")));
+
+        // v7 code + classical secret -> garbage
+        let v7 = encode_hybrid(carrier, message, passphrase, hybrid.public_key()).unwrap();
+        let garbled = decode(&v7.code, carrier, passphrase, classical.secret_key());
+        let lower = garbled.message.to_lowercase();
+        assert!(!(lower.contains("ama") && lower.contains("parque")));
+    }
+}

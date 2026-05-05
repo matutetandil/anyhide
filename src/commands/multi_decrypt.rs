@@ -6,7 +6,10 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::Args;
 
-use anyhide::crypto::{decrypt_multi, load_secret_key, MultiRecipientData};
+use anyhide::crypto::{
+    decrypt_multi, decrypt_multi_hybrid, detect_key_type, load_hybrid_secret_key, load_secret_key,
+    MultiRecipientData, MultiRecipientDataHybrid,
+};
 
 use super::CommandExecutor;
 
@@ -21,7 +24,7 @@ pub struct MultiDecryptCommand {
     #[arg(short, long)]
     pub passphrase: String,
 
-    /// Path to your private key
+    /// Path to your private key (classical or hybrid PQ — auto-detected)
     #[arg(short, long)]
     pub key: PathBuf,
 }
@@ -38,16 +41,45 @@ impl CommandExecutor for MultiDecryptCommand {
                 .context("Failed to decode base64 input")?
         };
 
-        let secret_key = load_secret_key(&self.key)
-            .with_context(|| format!("Failed to load private key from {}", self.key.display()))?;
+        // Auto-detect the key flavor from the PEM header
+        let key_pem = std::fs::read_to_string(&self.key)
+            .with_context(|| format!("Failed to read private key from {}", self.key.display()))?;
+        let key_is_hybrid = matches!(detect_key_type(&key_pem), Some(kt) if kt.is_hybrid());
 
-        // Deserialize
-        let encrypted = MultiRecipientData::from_bytes(&bytes)
-            .context("Failed to parse encrypted data")?;
+        // The first byte of MultiRecipientDataHybrid serialization is the version
+        // discriminator (0x02). v1 classical does not start with this byte.
+        let payload_is_hybrid = bytes.first().copied() == Some(0x02);
 
-        // Decrypt
-        let decrypted = decrypt_multi(&encrypted, &self.passphrase, &secret_key)
-            .context("Failed to decrypt message")?;
+        if key_is_hybrid != payload_is_hybrid {
+            anyhow::bail!(
+                "Key / payload flavor mismatch.\n  \
+                 Key is {}, payload is {}.\n  \
+                 Multi-recipient classical (v1) and hybrid PQ (v2) wire formats are distinct \
+                 and do not cross-decrypt.",
+                if key_is_hybrid { "hybrid PQ" } else { "classical" },
+                if payload_is_hybrid { "hybrid PQ" } else { "classical" },
+            );
+        }
+
+        let decrypted = if payload_is_hybrid {
+            let secret_key = load_hybrid_secret_key(&self.key).with_context(|| {
+                format!(
+                    "Failed to load hybrid private key from {}",
+                    self.key.display()
+                )
+            })?;
+            let encrypted = MultiRecipientDataHybrid::from_bytes(&bytes)
+                .context("Failed to parse hybrid encrypted data")?;
+            decrypt_multi_hybrid(&encrypted, &self.passphrase, &secret_key)
+                .context("Failed to decrypt hybrid message")?
+        } else {
+            let secret_key = load_secret_key(&self.key)
+                .with_context(|| format!("Failed to load private key from {}", self.key.display()))?;
+            let encrypted = MultiRecipientData::from_bytes(&bytes)
+                .context("Failed to parse encrypted data")?;
+            decrypt_multi(&encrypted, &self.passphrase, &secret_key)
+                .context("Failed to decrypt message")?
+        };
 
         // Output as string
         let message = String::from_utf8_lossy(&decrypted);

@@ -1,7 +1,7 @@
 //! Encode command - hide messages or files in a carrier.
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -9,14 +9,53 @@ use clap::Args;
 
 use anyhide::contacts::ContactsConfig;
 use anyhide::crypto::{
-    load_public_key, load_signing_key, save_ephemeral_private_key_pem,
-    load_unified_keys_for_contact, update_unified_private_key,
-    load_public_key_for_contact, save_private_key_for_contact,
+    detect_key_type, load_hybrid_public_key, load_public_key, load_public_key_for_contact,
+    load_signing_key, load_unified_keys_for_contact, save_ephemeral_private_key_pem,
+    save_private_key_for_contact, update_unified_private_key, HybridPublicKey,
 };
 use anyhide::qr::{generate_qr_to_file, qr_capacity_info, QrConfig, QrFormat};
-use anyhide::{encode_with_carrier_config, encode_bytes_with_carrier_config, Carrier, EncoderConfig, DecoyConfig};
+use anyhide::{
+    encode_bytes_with_carrier_config, encode_bytes_with_carrier_config_hybrid,
+    encode_with_carrier_config, encode_with_carrier_config_hybrid, Carrier, DecoyConfig,
+    EncoderConfig,
+};
 
 use super::CommandExecutor;
+
+/// Resolved recipient key, either classical X25519 or hybrid post-quantum.
+///
+/// `resolve_their_public_key` loads the recipient's PEM (or pulls a key from
+/// an ephemeral store) and returns one of these variants. The encode call
+/// site dispatches to the matching `encode*` / `encode*_hybrid` based on the
+/// variant so v6 (classical) and v7 (hybrid) wire formats are produced from
+/// the same CLI invocation without the user picking a flag.
+enum RecipientKeyMaterial {
+    Classical(x25519_dalek::PublicKey),
+    Hybrid(HybridPublicKey),
+}
+
+/// Loads a recipient public key from a PEM file, auto-detecting whether the
+/// file is classical (`BEGIN ANYHIDE PUBLIC KEY`) or hybrid PQ
+/// (`BEGIN ANYHIDE HYBRID PUBLIC KEY`).
+fn load_recipient_pubkey(path: &Path) -> Result<RecipientKeyMaterial> {
+    let pem = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read public key from {}", path.display()))?;
+
+    match detect_key_type(&pem) {
+        Some(kt) if kt.is_hybrid() => {
+            let pk = load_hybrid_public_key(path).with_context(|| {
+                format!("Failed to load hybrid public key from {}", path.display())
+            })?;
+            Ok(RecipientKeyMaterial::Hybrid(pk))
+        }
+        _ => {
+            let pk = load_public_key(path).with_context(|| {
+                format!("Failed to load public key from {}", path.display())
+            })?;
+            Ok(RecipientKeyMaterial::Classical(pk))
+        }
+    }
+}
 
 /// Encode a message using a pre-shared carrier (ANY file).
 ///
@@ -168,10 +207,22 @@ impl CommandExecutor for EncodeCommand {
         }
 
         // Resolve recipient's public key from various sources
-        let (public_key, eph_store_info) = self.resolve_their_public_key()?;
+        let (recipient_key, eph_store_info) = self.resolve_their_public_key()?;
 
         // Validate ratchet requirements
         if self.ratchet {
+            // Hybrid recipients can't ratchet yet — `EncodedMessage.next_keypair`
+            // is X25519-only and the encoder rejects this combination at
+            // `EncoderError::RatchetUnsupportedForHybrid`. Fail fast at the CLI
+            // with a friendlier message before the encode runs.
+            if matches!(recipient_key, RecipientKeyMaterial::Hybrid(_)) {
+                anyhow::bail!(
+                    "--ratchet is not yet supported for hybrid post-quantum recipients. \
+                     Encode without --ratchet, or use a classical recipient key for \
+                     ratcheted exchanges."
+                );
+            }
+
             let has_my_key = self.my_key.is_some();
             let has_eph_store = eph_store_info.is_some();
 
@@ -253,8 +304,16 @@ impl CommandExecutor for EncodeCommand {
                 eprintln!("Encoding binary file: {} ({} bytes)", file_path.display(), data.len());
             }
 
-            encode_bytes_with_carrier_config(&carrier, &data, &self.passphrase, &public_key, &config)
-                .context("Failed to encode file")?
+            match &recipient_key {
+                RecipientKeyMaterial::Classical(pk) => {
+                    encode_bytes_with_carrier_config(&carrier, &data, &self.passphrase, pk, &config)
+                        .context("Failed to encode file")?
+                }
+                RecipientKeyMaterial::Hybrid(pk) => {
+                    encode_bytes_with_carrier_config_hybrid(&carrier, &data, &self.passphrase, pk, &config)
+                        .context("Failed to encode file (hybrid PQ)")?
+                }
+            }
         } else {
             // Text message encoding
             let message = match &self.message {
@@ -277,8 +336,16 @@ impl CommandExecutor for EncodeCommand {
                 eprintln!("Encoding text message ({} chars)", message.len());
             }
 
-            encode_with_carrier_config(&carrier, &message, &self.passphrase, &public_key, &config)
-                .context("Failed to encode message")?
+            match &recipient_key {
+                RecipientKeyMaterial::Classical(pk) => {
+                    encode_with_carrier_config(&carrier, &message, &self.passphrase, pk, &config)
+                        .context("Failed to encode message")?
+                }
+                RecipientKeyMaterial::Hybrid(pk) => {
+                    encode_with_carrier_config_hybrid(&carrier, &message, &self.passphrase, pk, &config)
+                        .context("Failed to encode message (hybrid PQ)")?
+                }
+            }
         };
 
         // Output code (split if requested)
@@ -389,8 +456,8 @@ struct EphStoreInfo {
 
 impl EncodeCommand {
     /// Resolves the recipient's public key from various sources.
-    /// Returns (public_key, optional_eph_store_info)
-    fn resolve_their_public_key(&self) -> Result<(x25519_dalek::PublicKey, Option<EphStoreInfo>)> {
+    /// Returns (key_material, optional_eph_store_info)
+    fn resolve_their_public_key(&self) -> Result<(RecipientKeyMaterial, Option<EphStoreInfo>)> {
         // Priority 0: Contact alias from ~/.anyhide/contacts.toml
         if let Some(alias) = &self.to {
             let contacts = ContactsConfig::load()
@@ -411,20 +478,34 @@ impl EncodeCommand {
                 )
             })?;
 
-            let public_key = load_public_key(&contact.public_key)
-                .with_context(|| format!(
+            let key_material = load_recipient_pubkey(&contact.public_key).with_context(|| {
+                format!(
                     "Failed to load public key for contact '{}' from {}",
-                    alias, contact.public_key.display()
-                ))?;
+                    alias,
+                    contact.public_key.display()
+                )
+            })?;
 
             if self.verbose {
-                eprintln!("Using contact '{}' ({})", alias, contact.public_key.display());
+                let label = match &key_material {
+                    RecipientKeyMaterial::Classical(_) => "classical",
+                    RecipientKeyMaterial::Hybrid(_) => "hybrid PQ",
+                };
+                eprintln!(
+                    "Using contact '{}' ({}, {})",
+                    alias,
+                    contact.public_key.display(),
+                    label
+                );
             }
 
-            return Ok((public_key, None));
+            return Ok((key_material, None));
         }
 
         // Priority 1: Unified ephemeral store (.eph)
+        // Ephemeral stores are classical-only via this CLI path. Hybrid PQ
+        // ephemeral stores have a parallel API (`*_for_contact_hybrid`) but
+        // are not yet wired into the encode command.
         if let Some(eph_path) = &self.eph_file {
             let contact = self.contact.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("--contact is required when using --eph-file")
@@ -444,10 +525,10 @@ impl EncodeCommand {
                 is_unified: true,
             };
 
-            return Ok((keys.their_public, Some(store_info)));
+            return Ok((RecipientKeyMaterial::Classical(keys.their_public), Some(store_info)));
         }
 
-        // Priority 2: Separated ephemeral stores (.eph.key + .eph.pub)
+        // Priority 2: Separated ephemeral stores (.eph.key + .eph.pub) — classical only.
         if let (Some(eph_keys), Some(eph_pubs)) = (&self.eph_keys, &self.eph_pubs) {
             let contact = self.contact.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("--contact is required when using --eph-keys/--eph-pubs")
@@ -467,29 +548,35 @@ impl EncodeCommand {
                 is_unified: false,
             };
 
-            return Ok((public_key, Some(store_info)));
+            return Ok((RecipientKeyMaterial::Classical(public_key), Some(store_info)));
         }
 
-        // Priority 3: --their-key (new parameter)
+        // Priority 3: --their-key (new parameter) — auto-detect classical vs hybrid PEM.
         if let Some(their_key_path) = &self.their_key {
-            let public_key = load_public_key(their_key_path)
-                .with_context(|| format!("Failed to load public key from {}", their_key_path.display()))?;
+            let key_material = load_recipient_pubkey(their_key_path)?;
 
             if self.verbose {
-                eprintln!("Loaded recipient's public key from {}", their_key_path.display());
+                let label = match &key_material {
+                    RecipientKeyMaterial::Classical(_) => "classical",
+                    RecipientKeyMaterial::Hybrid(_) => "hybrid PQ",
+                };
+                eprintln!(
+                    "Loaded recipient's public key from {} ({})",
+                    their_key_path.display(),
+                    label
+                );
             }
 
-            return Ok((public_key, None));
+            return Ok((key_material, None));
         }
 
-        // Priority 4: --key (deprecated)
+        // Priority 4: --key (deprecated) — auto-detect classical vs hybrid PEM.
         if let Some(key_path) = &self.key {
             eprintln!("WARNING: --key is deprecated. Use --their-key instead.");
 
-            let public_key = load_public_key(key_path)
-                .with_context(|| format!("Failed to load public key from {}", key_path.display()))?;
+            let key_material = load_recipient_pubkey(key_path)?;
 
-            return Ok((public_key, None));
+            return Ok((key_material, None));
         }
 
         anyhow::bail!(

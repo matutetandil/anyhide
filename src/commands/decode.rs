@@ -1,21 +1,34 @@
 //! Decode command - extract hidden messages or files from a carrier.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::Args;
 
 use anyhide::crypto::{
-    load_secret_key, load_verifying_key, KeyPair,
-    load_unified_keys_for_contact, update_unified_public_key,
-    load_private_key_for_contact, save_public_key_for_contact,
-    save_ephemeral_public_key_pem,
+    detect_key_type, load_hybrid_secret_key, load_private_key_for_contact, load_secret_key,
+    load_unified_keys_for_contact, load_verifying_key, save_ephemeral_public_key_pem,
+    save_public_key_for_contact, update_unified_public_key, HybridSecretKey, KeyPair,
 };
 use anyhide::qr::read_qr_from_file;
-use anyhide::{decode_with_carrier_config, decode_bytes_with_carrier_config, Carrier, DecoderConfig};
+use anyhide::{
+    decode_bytes_with_carrier_config, decode_bytes_with_carrier_config_hybrid,
+    decode_with_carrier_config, decode_with_carrier_config_hybrid, Carrier, DecoderConfig,
+};
 
 use super::CommandExecutor;
+
+/// Resolved recipient secret key — classical X25519 or hybrid post-quantum.
+///
+/// Decode dispatches between v6 (classical) and v7 (hybrid) wire formats based
+/// on which variant is loaded. Wire-format mismatches don't error here: the
+/// underlying never-fail decoder produces deterministic garbage if the user's
+/// key flavor doesn't match the code's wire format.
+enum MySecretKeyMaterial {
+    Classical(x25519_dalek::StaticSecret),
+    Hybrid(HybridSecretKey),
+}
 
 /// Decode a message using a pre-shared carrier (ANY file).
 ///
@@ -182,8 +195,8 @@ impl DecodeCommand {
             }
         }
 
-        // Resolve private key from various sources
-        let (secret_key, eph_store_info) = self.resolve_my_private_key();
+        // Resolve private key from various sources (classical or hybrid PQ)
+        let (secret_key_material, eph_store_info) = self.resolve_my_private_key();
 
         // Load verifying key if provided
         let verifying_key = self.verify.as_ref().and_then(|path| {
@@ -208,7 +221,22 @@ impl DecodeCommand {
 
         // If output file is specified, decode as binary
         if let Some(output_path) = &self.output {
-            let decoded = decode_bytes_with_carrier_config(&code, &carrier, &self.passphrase, &secret_key, &config);
+            let decoded = match &secret_key_material {
+                MySecretKeyMaterial::Classical(sk) => decode_bytes_with_carrier_config(
+                    &code,
+                    &carrier,
+                    &self.passphrase,
+                    sk,
+                    &config,
+                ),
+                MySecretKeyMaterial::Hybrid(hs) => decode_bytes_with_carrier_config_hybrid(
+                    &code,
+                    &carrier,
+                    &self.passphrase,
+                    hs,
+                    &config,
+                ),
+            };
 
             match std::fs::write(output_path, &decoded.data) {
                 Ok(_) => {
@@ -233,7 +261,22 @@ impl DecodeCommand {
             }
         } else {
             // Decode as text
-            let decoded = decode_with_carrier_config(&code, &carrier, &self.passphrase, &secret_key, &config);
+            let decoded = match &secret_key_material {
+                MySecretKeyMaterial::Classical(sk) => decode_with_carrier_config(
+                    &code,
+                    &carrier,
+                    &self.passphrase,
+                    sk,
+                    &config,
+                ),
+                MySecretKeyMaterial::Hybrid(hs) => decode_with_carrier_config_hybrid(
+                    &code,
+                    &carrier,
+                    &self.passphrase,
+                    hs,
+                    &config,
+                ),
+            };
 
             println!("{}", decoded.message);
 
@@ -253,15 +296,23 @@ impl DecodeCommand {
     }
 
     /// Resolves my private key from various sources.
-    /// Returns (secret_key, optional_eph_store_info)
-    fn resolve_my_private_key(&self) -> (x25519_dalek::StaticSecret, Option<EphStoreInfo>) {
-        // Priority 1: Unified ephemeral store (.eph)
+    /// Returns (key_material, optional_eph_store_info).
+    ///
+    /// PEM-based paths (`--my-key`, `--key`) auto-detect classical vs hybrid PQ
+    /// from the PEM header. Ephemeral-store paths (`--eph-file`, `--eph-keys`/
+    /// `--eph-pubs`) are classical-only via this CLI surface; hybrid PQ
+    /// ephemeral stores have a parallel API but are not yet wired here.
+    fn resolve_my_private_key(&self) -> (MySecretKeyMaterial, Option<EphStoreInfo>) {
+        // Priority 1: Unified ephemeral store (.eph) — classical only
         if let Some(eph_path) = &self.eph_file {
             let contact = match &self.contact {
                 Some(c) => c,
                 None => {
                     eprintln!("Warning: --contact is required when using --eph-file");
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             };
 
@@ -276,22 +327,28 @@ impl DecodeCommand {
                         contact: contact.clone(),
                         is_unified: true,
                     };
-                    return (keys.my_private, Some(store_info));
+                    return (MySecretKeyMaterial::Classical(keys.my_private), Some(store_info));
                 }
                 Err(e) => {
                     eprintln!("Warning: Could not load keys for contact '{}': {}", contact, e);
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             }
         }
 
-        // Priority 2: Separated ephemeral stores (.eph.key + .eph.pub)
+        // Priority 2: Separated ephemeral stores (.eph.key + .eph.pub) — classical only
         if let (Some(eph_keys), Some(eph_pubs)) = (&self.eph_keys, &self.eph_pubs) {
             let contact = match &self.contact {
                 Some(c) => c,
                 None => {
                     eprintln!("Warning: --contact is required when using --eph-keys/--eph-pubs");
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             };
 
@@ -306,49 +363,65 @@ impl DecodeCommand {
                         contact: contact.clone(),
                         is_unified: false,
                     };
-                    return (key, Some(store_info));
+                    return (MySecretKeyMaterial::Classical(key), Some(store_info));
                 }
                 Err(e) => {
                     eprintln!("Warning: Could not load private key for contact '{}': {}", contact, e);
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             }
         }
 
-        // Priority 3: --my-key (new parameter)
+        // Priority 3: --my-key (new parameter) — auto-detect classical vs hybrid PEM
         if let Some(my_key_path) = &self.my_key {
-            match load_secret_key(my_key_path) {
-                Ok(key) => {
+            match load_my_secret_key(my_key_path) {
+                Ok(material) => {
                     if self.verbose {
-                        eprintln!("Loaded private key from {}", my_key_path.display());
+                        let label = match &material {
+                            MySecretKeyMaterial::Classical(_) => "classical",
+                            MySecretKeyMaterial::Hybrid(_) => "hybrid PQ",
+                        };
+                        eprintln!("Loaded private key from {} ({})", my_key_path.display(), label);
                     }
-                    return (key, None);
+                    return (material, None);
                 }
                 Err(e) => {
                     eprintln!("Warning: Could not load private key from {}: {}", my_key_path.display(), e);
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             }
         }
 
-        // Priority 4: --key (deprecated)
+        // Priority 4: --key (deprecated) — auto-detect classical vs hybrid PEM
         if let Some(key_path) = &self.key {
             eprintln!("WARNING: --key is deprecated. Use --my-key instead.");
 
-            match load_secret_key(key_path) {
-                Ok(key) => {
-                    return (key, None);
+            match load_my_secret_key(key_path) {
+                Ok(material) => {
+                    return (material, None);
                 }
                 Err(e) => {
                     eprintln!("Warning: Could not load private key from {}: {}", key_path.display(), e);
-                    return (KeyPair::generate().into_secret_key(), None);
+                    return (
+                        MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+                        None,
+                    );
                 }
             }
         }
 
         // No key provided - for plausible deniability, generate a random key
         eprintln!("Warning: No private key specified. Use --my-key, --eph-file, or --eph-keys/--eph-pubs");
-        (KeyPair::generate().into_secret_key(), None)
+        (
+            MySecretKeyMaterial::Classical(KeyPair::generate().into_secret_key()),
+            None,
+        )
     }
 
     /// Saves the sender's next public key for forward secrecy ratchet.
@@ -469,6 +542,28 @@ fn show_next_public_key(next_public_key: &Option<Vec<u8>>) {
         }
     } else {
         eprintln!("Forward Secrecy: None (sender did not include next public key)");
+    }
+}
+
+/// Loads a recipient secret key from a PEM file, auto-detecting classical
+/// (`BEGIN ANYHIDE PRIVATE KEY`) vs hybrid PQ (`BEGIN ANYHIDE HYBRID PRIVATE KEY`).
+fn load_my_secret_key(path: &Path) -> Result<MySecretKeyMaterial> {
+    let pem = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read private key from {}", path.display()))?;
+
+    match detect_key_type(&pem) {
+        Some(kt) if kt.is_hybrid() => {
+            let sk = load_hybrid_secret_key(path).with_context(|| {
+                format!("Failed to load hybrid private key from {}", path.display())
+            })?;
+            Ok(MySecretKeyMaterial::Hybrid(sk))
+        }
+        _ => {
+            let sk = load_secret_key(path).with_context(|| {
+                format!("Failed to load private key from {}", path.display())
+            })?;
+            Ok(MySecretKeyMaterial::Classical(sk))
+        }
     }
 }
 

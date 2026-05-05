@@ -138,6 +138,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Total tests: 388 → 395
   - All hybrid functions re-exported at the crate root in `lib.rs`
 
+- **CLI auto-dispatch between classical and hybrid PQ at the encode / decode commands** (`commands/{encode,decode,multi_encrypt,multi_decrypt}.rs`)
+  - `anyhide encode` and `anyhide decode` now sniff the recipient / user PEM header (via `detect_key_type`) and route to the matching encoder / decoder family. Classical PEMs (`BEGIN ANYHIDE PUBLIC KEY` / `PRIVATE KEY`) produce / consume v6 codes; hybrid PEMs (`BEGIN ANYHIDE HYBRID …`) produce / consume v7 codes. No flag needed for the common path
+  - Verbose mode prints which flavor was loaded: `Loaded recipient's public key from <path> (classical)` or `(hybrid PQ)`
+  - Encode CLI rejects `--ratchet` early with a friendly message when the recipient is a hybrid key, mirroring `EncoderError::RatchetUnsupportedForHybrid` from the lib layer
+  - Wire-format / key-flavor mismatches at decode (v6 code + hybrid secret, or v7 code + classical secret) flow through the lib's never-fail decoder and yield deterministic garbage — no panics, no leaks
+  - Ephemeral-store paths (`--eph-file`, `--eph-keys`/`--eph-pubs`) remain classical-only via the CLI surface; hybrid PQ ephemeral stores have a parallel API but are not yet wired into encode / decode commands
+  - `anyhide multi-encrypt`: requires all `--keys` to share a flavor (all classical or all hybrid) and dispatches between `encrypt_multi` (v1) and `encrypt_multi_hybrid` (v2). Mixed-flavor lists fail fast with a clear error pointing at the first off-flavor key
+  - `anyhide multi-decrypt`: auto-detects the payload flavor from its leading version byte (0x02 = hybrid v2) and the key flavor from the PEM header, requires the two to match, and dispatches to the matching decrypt family
+  - 5 new integration tests under `hybrid_dispatcher` covering round-trip with a text carrier, round-trip with a binary payload, v7 magic-prefix emission, v6 magic-prefix absence, and cross-format garbage on mismatch
+  - Total tests: 395 → 400, no regressions
+
 - **`keygen --hybrid` flag** (`commands/keygen.rs`)
   - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
   - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake
