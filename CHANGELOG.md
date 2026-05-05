@@ -63,6 +63,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `EphemeralStoreError::HybridKemError` variant for KEM-level errors during decode
   - 9 additional unit tests covering each format round-trip, multiple contacts, public-key update, generate-and-save, contact-not-found, v2 rejecting v1, and v2 files serializing `"version": 2`
 
+- **Hybrid PQ chat handshake protocol v2** (`chat/protocol/handshake.rs`)
+  - **BREAKING**: bumped `CHAT_PROTOCOL_VERSION` from `1` to `2`. v2 peers refuse v1 connections and vice-versa — chat is RAM-only with no persisted state, so the hard break is a clean migration boundary
+  - `HandshakeInit.ephemeral_public_hybrid: Vec<u8>` (1216 bytes) replaces the v1 32-byte X25519 ephemeral; `identity_public: [u8; 32]` (Ed25519 verifying key) is unchanged because authentication remains classical
+  - `HandshakeResponse` adds `kem_ciphertext_to_initiator: Vec<u8>` (1120 bytes) — responder encapsulates against the initiator's hybrid eph pubkey to derive `ss_resp_to_init`
+  - `HandshakeComplete` adds `kem_ciphertext_to_responder: Vec<u8>` (1120 bytes) — initiator encapsulates against the responder's hybrid eph pubkey to derive `ss_init_to_resp`
+  - All new structs validate wire-size invariants on construction and via `validate()` post-deserialization; `HandshakeError::InvalidSize` and `VersionMismatch` give specific error feedback
+  - KEM helper functions exposed for callers: `responder_encapsulate_to_initiator`, `initiator_decapsulate_from_responder`, `initiator_encapsulate_to_responder`, `responder_decapsulate_from_initiator`, `parse_peer_pubkey`, `parse_kem_ciphertext`
+  - Two-direction KEM design ("PQXDH-shape"): both sides contribute KEM entropy; the master session secret mixes both shared secrets via `derive_master_secret(ss_resp_to_init, ss_init_to_resp)` with HKDF info `ANYHIDE-CHAT-V2-MASTER`
+
+- **Hybrid PQ KEM ratchet** (`chat/protocol/ratchet.rs`)
+  - `kem_ratchet_send` replaces `dh_ratchet`: generates a fresh `HybridKeyPair` and encapsulates against the peer's current pubkey to derive a new send chain. Returns `KemRatchetOutput { new_secret, new_public, kem_ciphertext, send_chain }`
+  - `kem_ratchet_receive`: receiver decapsulates the ciphertext attached to the incoming message header to recover the same shared secret and derive the matching recv chain
+  - `derive_session_keys` now takes a 32-byte master secret instead of a single DH shared secret; HKDF info binds both ephemeral pubkeys (initiator first) for transcript binding
+  - `derive_master_secret(ss_resp_to_init, ss_init_to_resp)` mixes the two handshake KEM secrets into a single master via HKDF
+  - `derive_handshake_carrier_key(shared_secret, responder)` derives per-direction carrier-encryption keys with domain-separated HKDF labels (`ANYHIDE-CHAT-V2-RESP-CARRIERS` / `ANYHIDE-CHAT-V2-INIT-CARRIERS`)
+  - Symmetric KDF chain (`kdf_chain`), carrier chain (`advance_carrier_chain`), and per-message passphrase derivation (`derive_message_passphrase`) are unchanged from v1
+
+- **Hybrid PQ message header** (`chat/protocol/header.rs`)
+  - `MessageHeader.dh_public_hybrid: Vec<u8>` (1216 bytes) replaces v1 `dh_public: [u8; 32]`
+  - `MessageHeader.kem_ciphertext: Option<Vec<u8>>` (1120 bytes when `Some`) is attached only on messages that perform a ratchet step; chain-mode messages set it to `None` to keep per-message overhead at the pubkey size
+  - `encrypt_header` / `decrypt_header` validate sizes before/after AEAD; `HEADER_PUBKEY_SIZE` and `HEADER_KEM_CT_SIZE` constants exposed
+
+- **`ChatSession` migrated to hybrid types** (`chat/session.rs`)
+  - `init_as_initiator` / `init_as_responder` take `HybridSecretKey` + `HybridPublicKey` and a 32-byte master secret (from `derive_master_secret`) instead of `StaticSecret` / `PublicKey` and computing DH internally
+  - Internal state uses `HybridSecretKey` / `HybridPublicKey` directly; the X25519 component (32B) of the hybrid pubkey is used as the compact identifier for skipped-message-key bookkeeping (HashMap keys stay small)
+  - `pending_kem_ct` field stashes the KEM ciphertext produced by a sender-side ratchet step; consumed and attached to the next outgoing message header
+  - `Drop` impl preserved: chain keys, signing key, passphrases, carriers, and skipped-key cache are zeroized; hybrid keys self-zeroize via `x25519-dalek` + `ml-kem` `zeroize` features
+  - `receive_message` rejects v1 wire messages (any `version != CHAT_PROTOCOL_VERSION`) with `ChatError::VersionMismatch`
+  - Per-message anyhide encoding still uses an ephemeral X25519 keypair derived from the message key — confidentiality at that layer comes from the KEM-derived chain key plus the user passphrase, not from the encoding's pubkey
+
+- **Chat command handshake migrated** (`commands/chat.rs`)
+  - All four handshake call sites (`perform_initiator_handshake`, `perform_responder_handshake`, `perform_accept_handshake`, `perform_connect_handshake`) rewritten to use hybrid KEM operations
+  - Ephemeral keypair generation uses `hybrid_kem::generate_keypair()` instead of `StaticSecret::random_from_rng`
+  - Carrier-encryption keys derived from KEM shared secrets (one per direction) instead of the v1 DH-then-HKDF derivation; signed handshake data binds the new pubkey + ciphertext fields
+  - Bumped wire version constant in all `WireMessage::new` calls to `CHAT_PROTOCOL_VERSION` (now 2)
+
+- **Chat identity & contact validation requires hybrid PQ keys** (`commands/chat.rs`)
+  - `init_identity`, `add_contact`, and `add_contact_from_dialog` now invoke `require_hybrid_encryption_pubkey` / `require_hybrid_encryption_keypair` to validate the encryption key is hybrid before accepting it
+  - Error messages on classical keys explicitly point to `anyhide keygen --hybrid -o <path>` and explain that the chat protocol now requires post-quantum hybrid keys
+  - Loaders check the PEM header type rather than just the file size, so a classical PEM is rejected up front instead of failing later inside the handshake
+  - Signing identity continues to use Ed25519 — only encryption migrates
+
+- **Chat Identity QR bumped to v2** (`commands/chat.rs`)
+  - `CHAT_QR_VERSION` `0x01` → `0x02`. v2 wire format: `magic(4) | version(1) | onion(56) | enc_pubkey_hybrid(1216) | sign_pubkey(32) | nick_len(1) | nick(0-63)`
+  - `encode_chat_identity` / `decode_chat_identity` updated to handle 1216-byte hybrid encryption pubkey; signing pubkey unchanged at 32 bytes
+  - `decode_chat_identity` validates magic + version *before* the body-size check so v1 QR codes report "Unsupported QR version (regenerate with `anyhide keygen --hybrid` and re-export)" instead of a confusing "too short" error
+  - `import_qr_contact` writes the encryption pubkey using the new hybrid PEM format (`-----BEGIN ANYHIDE HYBRID PUBLIC KEY-----`)
+  - Total wire size grows from ~126 bytes (v1) to ~1310 bytes (v2) — still well within QR Version 40 capacity at error correction L
+
+- **`EphemeralContact.public_key` is now `Vec<u8>` (1216 bytes)**
+  - `parse_ephemeral_from_args` accepts hybrid pubkey hex (2432 characters); rejects 32-byte (v1) hex with a clear error pointing to `--from-qr` as the recommended UX
+  - The function emits a stderr note recommending `--from-qr` whenever it succeeds — typing 2432 hex chars on a CLI is impractical, QR is the path
+  - `parse_ephemeral_from_qr` (preferred path) decodes hybrid pubkey directly from QR bytes — no UX change for users on this path
+
 ### Dependencies
 
 - Added `ml-kem = "0.3.0"` with `zeroize` and `getrandom` features (RustCrypto pure-Rust implementation)

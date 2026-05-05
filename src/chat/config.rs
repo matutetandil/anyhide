@@ -3,7 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Protocol version for chat messages.
-pub const CHAT_PROTOCOL_VERSION: u8 = 1;
+///
+/// Version 2 introduces hybrid post-quantum key exchange (X25519 + ML-KEM-768)
+/// throughout the handshake, ratchet, and message header. Version 1 was the
+/// pre-quantum classical X25519 protocol; v2 peers refuse v1 connections and
+/// vice-versa. This is an intentional hard break — chat is RAM-only, so there
+/// is no historical state to migrate beyond regenerating identity keys.
+pub const CHAT_PROTOCOL_VERSION: u8 = 2;
 
 /// Carrier mode for chat sessions.
 ///

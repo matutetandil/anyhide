@@ -17,7 +17,57 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use x25519_dalek::{PublicKey, StaticSecret};
+// x25519_dalek types are no longer needed at this layer — chat handshake is fully hybrid (X25519 + ML-KEM-768).
+
+/// Validates that a `.pub` file at `path` holds a hybrid post-quantum public key.
+///
+/// Chat protocol v2 requires hybrid X25519 + ML-KEM-768 encryption pubkeys.
+/// If the file is a classical X25519 PEM (the v1 format) or unparseable, this
+/// returns a user-facing error pointing to `keygen --hybrid`.
+fn require_hybrid_encryption_pubkey(
+    path: &std::path::Path,
+) -> Result<anyhide::crypto::hybrid_kem::HybridPublicKey> {
+    match load_hybrid_public_key_with_type(path) {
+        Ok((pubkey, ty)) if matches!(ty, KeyType::HybridV1 | KeyType::EphemeralHybridV1) => Ok(pubkey),
+        Ok((_, ty)) => bail!(
+            "Encryption public key at {} is wrong type ({:?}); chat needs a hybrid PQ key",
+            path.display(),
+            ty
+        ),
+        Err(_) => {
+            // Try loading as classical X25519 to give a more specific message —
+            // most common case is a user holding a v1 keypair from before the
+            // PQ migration.
+            if load_public_key(path).is_ok() {
+                bail!(
+                    "Encryption public key at {} is classical X25519 (chat protocol v1).\n\
+                     Chat protocol v2 requires hybrid post-quantum keys (X25519 + ML-KEM-768).\n\
+                     Regenerate with: anyhide keygen --hybrid -o <path-without-extension>\n\
+                     Then re-run `anyhide chat init` and re-share your public key with contacts.",
+                    path.display()
+                );
+            }
+            bail!(
+                "Failed to load encryption public key from {} — file is not a valid Anyhide PEM",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Validates that a hybrid keypair at `base_path` (looking for `.pub` and `.key`)
+/// can be loaded successfully. Returns the keypair or an error pointing to
+/// `keygen --hybrid` if the keypair is classical or missing.
+fn require_hybrid_encryption_keypair(base_path: &std::path::Path) -> Result<HybridKeyPair> {
+    let pub_path = base_path.with_extension("pub");
+    require_hybrid_encryption_pubkey(&pub_path)?;
+    HybridKeyPair::load_from_files(base_path).with_context(|| {
+        format!(
+            "Failed to load hybrid encryption keypair from {}.{{pub,key}}",
+            base_path.display()
+        )
+    })
+}
 
 /// Prompt for a passphrase (input hidden).
 fn prompt_passphrase(prompt: &str) -> Result<String> {
@@ -46,12 +96,22 @@ use anyhide::chat::tui::{
     handle_multi_key_event, handle_multi_command,
 };
 
-use anyhide::chat::protocol::{decrypt_carriers, encrypt_carriers, hash_carriers};
+use anyhide::chat::protocol::{
+    decrypt_carriers, derive_handshake_carrier_key, derive_master_secret, encrypt_carriers,
+    hash_carriers, initiator_decapsulate_from_responder, initiator_encapsulate_to_responder,
+    parse_kem_ciphertext, parse_peer_pubkey, responder_decapsulate_from_initiator,
+    responder_encapsulate_to_initiator,
+};
+use anyhide::chat::CHAT_PROTOCOL_VERSION;
+use anyhide::crypto::hybrid_kem::{HybridPublicKey, HybridSecretKey};
 use anyhide::chat::{
     generate_carriers, ChatConfig, ChatSession, HandshakeComplete, HandshakeInit,
     HandshakeResponse, WireMessage,
 };
-use anyhide::crypto::{load_public_key, load_verifying_key, SigningKeyPair};
+use anyhide::crypto::{
+    load_hybrid_public_key_with_type, load_public_key, load_verifying_key, HybridKeyPair, KeyType,
+    SigningKeyPair,
+};
 use anyhide::qr::{generate_qr_to_file, read_qr_from_file, QrConfig, QrFormat};
 
 // Chat contacts configuration
@@ -76,9 +136,9 @@ pub struct ChatContact {
 pub struct EphemeralContact {
     /// Contact's .onion address (without port).
     pub onion_address: String,
-    /// Their encryption public key (32 bytes).
-    pub public_key: [u8; 32],
-    /// Their signing public key (32 bytes).
+    /// Their hybrid PQ encryption public key (1216 bytes: X25519 || ML-KEM-768).
+    pub public_key: Vec<u8>,
+    /// Their Ed25519 signing public key (32 bytes).
     pub signing_key: [u8; 32],
 }
 
@@ -425,17 +485,32 @@ fn parse_ephemeral_from_qr(qr_path: &PathBuf) -> Result<EphemeralContact> {
 }
 
 /// Parse ephemeral contact from command line arguments.
+///
+/// In chat protocol v2 the encryption pubkey is hybrid (1216 bytes → 2432 hex
+/// characters). Hex on the CLI is impractical at that size — `--from-qr` is the
+/// recommended path for ephemeral chat. The function still accepts hex for
+/// scripting/automation, but emits a warning.
 fn parse_ephemeral_from_args(onion: &str, pubkey_hex: &str, sign_key_hex: &str) -> Result<EphemeralContact> {
-    // Parse encryption public key
+    let expected_pubkey_bytes = anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE;
+    let expected_pubkey_hex = expected_pubkey_bytes * 2;
+
     let pubkey_bytes = hex::decode(pubkey_hex)
         .context("Invalid --pubkey: must be valid hex")?;
-    if pubkey_bytes.len() != 32 {
-        bail!("Invalid --pubkey: must be 32 bytes (64 hex chars), got {}", pubkey_bytes.len());
+    if pubkey_bytes.len() != expected_pubkey_bytes {
+        bail!(
+            "Invalid --pubkey: must be {} bytes ({} hex chars) for hybrid PQ key, got {} bytes.\n\
+             Tip: --from-qr is much easier than passing 2432 hex characters on the CLI.",
+            expected_pubkey_bytes,
+            expected_pubkey_hex,
+            pubkey_bytes.len()
+        );
     }
-    let mut public_key = [0u8; 32];
-    public_key.copy_from_slice(&pubkey_bytes);
 
-    // Parse signing public key
+    eprintln!(
+        "Note: hybrid PQ keys are {} bytes; consider `--from-qr <image>` for a friendlier UX.",
+        expected_pubkey_bytes
+    );
+
     let sign_key_bytes = hex::decode(sign_key_hex)
         .context("Invalid --sign-key: must be valid hex")?;
     if sign_key_bytes.len() != 32 {
@@ -444,7 +519,6 @@ fn parse_ephemeral_from_args(onion: &str, pubkey_hex: &str, sign_key_hex: &str) 
     let mut signing_key = [0u8; 32];
     signing_key.copy_from_slice(&sign_key_bytes);
 
-    // Clean onion address
     let onion_clean = onion.split(':').next().unwrap_or(onion);
     let onion_addr = if onion_clean.ends_with(".onion") {
         onion_clean.to_string()
@@ -454,7 +528,7 @@ fn parse_ephemeral_from_args(onion: &str, pubkey_hex: &str, sign_key_hex: &str) 
 
     Ok(EphemeralContact {
         onion_address: onion_addr,
-        public_key,
+        public_key: pubkey_bytes,
         signing_key,
     })
 }
@@ -609,9 +683,8 @@ async fn start_ephemeral_chat_session(
             }
         };
 
-        // Generate ephemeral key for this session
-        let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let my_eph_public = PublicKey::from(&my_eph_secret);
+        // Generate hybrid ephemeral keypair for this session.
+        let (my_eph_secret, my_eph_public) = anyhide::crypto::hybrid_kem::generate_keypair();
 
         // Perform handshake based on role
         // Ephemeral contacts are by definition unknown (not in contacts list)
@@ -696,6 +769,11 @@ async fn init_identity(nickname: &str, key_path: &PathBuf, sign_key_path: &PathB
         bail!("Signing public key not found: {}", sign_pub_file.display());
     }
 
+    // Chat v2 requires hybrid post-quantum encryption keys. Validate up-front
+    // so the user gets a clear, actionable error before Tor bootstrap.
+    require_hybrid_encryption_keypair(&key_base)
+        .context("Chat identity rejected: encryption keypair is not hybrid PQ")?;
+
     println!("Initializing chat identity...");
     println!();
 
@@ -757,6 +835,10 @@ fn add_contact(name: &str, onion: &str, key_path: &PathBuf, sign_key_path: &Path
         bail!("Signing public key not found: {}", sign_key_path.display());
     }
 
+    // Chat v2 requires hybrid PQ encryption pubkeys for contacts.
+    require_hybrid_encryption_pubkey(key_path)
+        .context("Cannot add contact: encryption public key is not hybrid PQ")?;
+
     // Clean onion address (remove port if present)
     let onion_clean = onion.split(':').next().unwrap_or(onion).to_string();
 
@@ -798,10 +880,12 @@ fn add_contact_from_dialog(
         bail!("Signing public key not found: {}", sign_key_path.display());
     }
 
-    // Clean onion address (remove port if present)
+    // Chat v2 requires hybrid PQ encryption pubkeys for contacts.
+    require_hybrid_encryption_pubkey(&key_path)
+        .context("Cannot add contact: encryption public key is not hybrid PQ")?;
+
     let onion_clean = onion.split(':').next().unwrap_or(onion).to_string();
 
-    // Load config fresh, modify, and save
     let mut config = ChatConfig2::load()?;
     config.contacts.insert(
         name.to_string(),
@@ -903,41 +987,56 @@ fn remove_contact(name: &str) -> Result<()> {
 // =============================================================================
 
 /// Chat identity QR format version.
-const CHAT_QR_VERSION: u8 = 0x01;
+/// QR identity format version. v1 used 32-byte X25519 encryption pubkeys
+/// (chat protocol v1, pre-quantum); v2 uses 1216-byte hybrid X25519 + ML-KEM-768
+/// pubkeys (chat protocol v2). v1 QR codes are not accepted by v2 readers.
+const CHAT_QR_VERSION: u8 = 0x02;
 
 /// Magic bytes to identify Anyhide chat identity QR codes.
 const CHAT_QR_MAGIC: &[u8] = b"AHID"; // Anyhide ID
 
-/// Encode chat identity to binary format for QR.
-/// Format: [magic:4][version:1][onion:56][enc_key:32][sign_key:32][nick_len:1][nick:0-63]
+/// QR identity wire-format size constants.
+const QR_ENC_PUBKEY_SIZE: usize = anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE;
+const QR_SIGN_PUBKEY_SIZE: usize = 32;
+const QR_ONION_SIZE: usize = 56;
+
+/// Encode chat identity to binary format for QR (v2: hybrid PQ encryption pubkey).
+///
+/// Format: `[magic:4][version:1][onion:56][enc_key_hybrid:1216][sign_key:32][nick_len:1][nick:0-63]`
 fn encode_chat_identity(
     onion: &str,
-    enc_pubkey: &[u8; 32],
-    sign_pubkey: &[u8; 32],
+    enc_pubkey_hybrid: &[u8],
+    sign_pubkey: &[u8; QR_SIGN_PUBKEY_SIZE],
     nickname: &str,
 ) -> Result<Vec<u8>> {
-    let mut data = Vec::with_capacity(128);
+    if enc_pubkey_hybrid.len() != QR_ENC_PUBKEY_SIZE {
+        bail!(
+            "encode_chat_identity: hybrid encryption pubkey must be {} bytes, got {}",
+            QR_ENC_PUBKEY_SIZE,
+            enc_pubkey_hybrid.len()
+        );
+    }
 
-    // Magic bytes
+    let mut data = Vec::with_capacity(
+        4 + 1 + QR_ONION_SIZE + QR_ENC_PUBKEY_SIZE + QR_SIGN_PUBKEY_SIZE + 1 + 63,
+    );
+
     data.extend_from_slice(CHAT_QR_MAGIC);
-
-    // Version
     data.push(CHAT_QR_VERSION);
 
-    // Onion address (56 bytes without ".onion")
     let onion_clean = onion.trim_end_matches(".onion");
-    if onion_clean.len() != 56 {
-        bail!("Invalid onion address length: {} (expected 56)", onion_clean.len());
+    if onion_clean.len() != QR_ONION_SIZE {
+        bail!(
+            "Invalid onion address length: {} (expected {})",
+            onion_clean.len(),
+            QR_ONION_SIZE
+        );
     }
     data.extend_from_slice(onion_clean.as_bytes());
 
-    // Encryption public key (32 bytes)
-    data.extend_from_slice(enc_pubkey);
-
-    // Signing public key (32 bytes)
+    data.extend_from_slice(enc_pubkey_hybrid);
     data.extend_from_slice(sign_pubkey);
 
-    // Nickname (length byte + UTF-8 string, max 63 bytes)
     let nick_bytes = nickname.as_bytes();
     if nick_bytes.len() > 63 {
         bail!("Nickname too long: {} bytes (max 63)", nick_bytes.len());
@@ -948,47 +1047,57 @@ fn encode_chat_identity(
     Ok(data)
 }
 
-/// Decode chat identity from binary format.
-/// Returns (onion, enc_pubkey, sign_pubkey, nickname).
-fn decode_chat_identity(data: &[u8]) -> Result<(String, [u8; 32], [u8; 32], String)> {
-    // Minimum size: magic(4) + version(1) + onion(56) + enc_key(32) + sign_key(32) + nick_len(1) = 126
-    if data.len() < 126 {
-        bail!("Invalid QR data: too short ({} bytes, min 126)", data.len());
+/// Decode chat identity from binary format (v2).
+///
+/// Returns `(onion, enc_pubkey_hybrid_bytes, sign_pubkey, nickname)`. The
+/// hybrid encryption pubkey is returned as `Vec<u8>` (length always
+/// `QR_ENC_PUBKEY_SIZE` = 1216) so callers can convert to `HybridPublicKey`.
+fn decode_chat_identity(data: &[u8]) -> Result<(String, Vec<u8>, [u8; QR_SIGN_PUBKEY_SIZE], String)> {
+    // Validate magic + version first so v1 QRs (which are smaller than v2's
+    // minimum body size) report the actual issue ("unsupported version")
+    // instead of a confusing "too short" error.
+    if data.len() < 5 {
+        bail!("Invalid QR data: too short ({} bytes, min 5 for header)", data.len());
     }
 
     let mut pos = 0;
 
-    // Check magic
     if &data[pos..pos + 4] != CHAT_QR_MAGIC {
         bail!("Invalid QR: not an Anyhide chat identity (wrong magic bytes)");
     }
     pos += 4;
 
-    // Check version
     let version = data[pos];
     if version != CHAT_QR_VERSION {
-        bail!("Unsupported QR version: {} (expected {})", version, CHAT_QR_VERSION);
+        bail!(
+            "Unsupported QR version: {} (this build expects v{}). \
+             v1 QR codes are from a pre-quantum protocol; ask the contact to \
+             regenerate their identity with `anyhide keygen --hybrid` and re-export.",
+            version,
+            CHAT_QR_VERSION
+        );
     }
     pos += 1;
 
-    // Onion address (56 bytes)
-    let onion_bytes = &data[pos..pos + 56];
+    // Now validate the v2 body size.
+    let min_size = 4 + 1 + QR_ONION_SIZE + QR_ENC_PUBKEY_SIZE + QR_SIGN_PUBKEY_SIZE + 1;
+    if data.len() < min_size {
+        bail!("Invalid QR data: too short ({} bytes, min {})", data.len(), min_size);
+    }
+
+    let onion_bytes = &data[pos..pos + QR_ONION_SIZE];
     let onion = String::from_utf8(onion_bytes.to_vec())
         .context("Invalid onion address encoding")?;
     let onion_full = format!("{}.onion", onion);
-    pos += 56;
+    pos += QR_ONION_SIZE;
 
-    // Encryption public key (32 bytes)
-    let mut enc_pubkey = [0u8; 32];
-    enc_pubkey.copy_from_slice(&data[pos..pos + 32]);
-    pos += 32;
+    let enc_pubkey_hybrid = data[pos..pos + QR_ENC_PUBKEY_SIZE].to_vec();
+    pos += QR_ENC_PUBKEY_SIZE;
 
-    // Signing public key (32 bytes)
-    let mut sign_pubkey = [0u8; 32];
-    sign_pubkey.copy_from_slice(&data[pos..pos + 32]);
-    pos += 32;
+    let mut sign_pubkey = [0u8; QR_SIGN_PUBKEY_SIZE];
+    sign_pubkey.copy_from_slice(&data[pos..pos + QR_SIGN_PUBKEY_SIZE]);
+    pos += QR_SIGN_PUBKEY_SIZE;
 
-    // Nickname
     let nick_len = data[pos] as usize;
     pos += 1;
 
@@ -998,7 +1107,7 @@ fn decode_chat_identity(data: &[u8]) -> Result<(String, [u8; 32], [u8; 32], Stri
     let nickname = String::from_utf8(data[pos..pos + nick_len].to_vec())
         .context("Invalid nickname encoding")?;
 
-    Ok((onion_full, enc_pubkey, sign_pubkey, nickname))
+    Ok((onion_full, enc_pubkey_hybrid, sign_pubkey, nickname))
 }
 
 /// Export your chat identity to a QR code.
@@ -1017,18 +1126,17 @@ fn export_qr_identity(output: &PathBuf, format: &str) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Onion address not generated. Run 'anyhide chat init' first."))?;
 
-    // Load public keys
+    // Load public keys (encryption is hybrid PQ in chat v2; signing is Ed25519).
     let enc_pub_path = PathBuf::from(format!("{}.pub", identity.key_path.display()));
     let sign_pub_path = PathBuf::from(format!("{}.sign.pub", identity.sign_key_path.display()));
 
-    let enc_pubkey = load_public_key(&enc_pub_path)
-        .with_context(|| format!("Failed to load encryption public key from {}", enc_pub_path.display()))?;
+    let enc_pubkey_hybrid = require_hybrid_encryption_pubkey(&enc_pub_path)
+        .with_context(|| format!("Failed to load hybrid encryption public key from {}", enc_pub_path.display()))?;
 
     let sign_pubkey = load_verifying_key(&sign_pub_path)
         .with_context(|| format!("Failed to load signing public key from {}", sign_pub_path.display()))?;
 
-    // Encode to binary
-    let enc_pubkey_bytes: [u8; 32] = enc_pubkey.to_bytes();
+    let enc_pubkey_bytes = enc_pubkey_hybrid.to_bytes(); // [u8; 1216]
     let sign_pubkey_bytes: [u8; 32] = sign_pubkey.to_bytes();
 
     let data = encode_chat_identity(onion, &enc_pubkey_bytes, &sign_pubkey_bytes, &identity.nickname)?;
@@ -1083,11 +1191,15 @@ fn import_qr_contact(image: &PathBuf, name: &str) -> Result<()> {
     let enc_key_path = config_dir.join(format!("{}.pub", name));
     let sign_key_path = config_dir.join(format!("{}.sign.pub", name));
 
-    // Write encryption public key as PEM
-    let enc_pem = format!(
-        "-----BEGIN ANYHIDE PUBLIC KEY-----\n{}\n-----END ANYHIDE PUBLIC KEY-----\n",
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &enc_pubkey)
-    );
+    // Write encryption public key as a hybrid PEM (chat v2 format).
+    let enc_pubkey_hybrid =
+        anyhide::crypto::hybrid_kem::HybridPublicKey::from_bytes(&enc_pubkey)
+            .context("Decoded QR contains an invalid hybrid encryption pubkey")?;
+    let enc_pem = anyhide::crypto::encode_hybrid_public_key_pem(
+        &enc_pubkey_hybrid,
+        anyhide::crypto::KeyType::HybridV1,
+    )
+    .context("Failed to encode hybrid PEM")?;
     fs::write(&enc_key_path, &enc_pem)
         .with_context(|| format!("Failed to write {}", enc_key_path.display()))?;
 
@@ -1345,9 +1457,8 @@ async fn start_chat(
             }
         };
 
-        // Generate ephemeral key for this session
-        let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let my_eph_public = PublicKey::from(&my_eph_secret);
+        // Generate hybrid ephemeral keypair for this session.
+        let (my_eph_secret, my_eph_public) = anyhide::crypto::hybrid_kem::generate_keypair();
 
         // Perform handshake based on role
         // This is a known contact (from contacts list)
@@ -1397,11 +1508,11 @@ async fn start_chat(
     run_chat_loop(&mut session, &mut conn, contact_name, &my_onion).await
 }
 
-/// Perform handshake as initiator (the one who connected).
+/// Perform hybrid PQ handshake as initiator (the one who connected).
 async fn perform_initiator_handshake<T: MessageTransport>(
     conn: &mut T,
-    my_eph_secret: StaticSecret,
-    my_eph_public: PublicKey,
+    my_eph_secret: HybridSecretKey,
+    my_eph_public: HybridPublicKey,
     my_signing_keypair: &SigningKeyPair,
     their_verifying_key: ed25519_dalek::VerifyingKey,
     config: ChatConfig,
@@ -1409,122 +1520,124 @@ async fn perform_initiator_handshake<T: MessageTransport>(
     user_passphrase: &str,
     i_know_them: bool,
 ) -> Result<ChatSession> {
-    // Create and sign init (including i_know_you flag)
-    let init_signed_data = {
-        let mut data = Vec::new();
-        data.push(1u8); // version
-        data.extend_from_slice(my_eph_public.as_bytes());
-        data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-        data.extend_from_slice(&bincode::serialize(&config).unwrap());
-        data.push(if i_know_them { 1 } else { 0 }); // i_know_you flag
-        data
-    };
+    let my_eph_public_bytes = my_eph_public.to_bytes().to_vec();
+    let identity_pub_bytes = my_signing_keypair.verifying_key().to_bytes();
+
+    // Build & sign init (Ed25519 over the hybrid eph pubkey, identity pubkey, config, i_know flag).
+    let init = HandshakeInit::new(
+        my_eph_public_bytes,
+        identity_pub_bytes,
+        config.clone(),
+        i_know_them,
+        Vec::new(), // signature added below
+    )
+    .context("Failed to build HandshakeInit")?;
+    let init_signed_data = init.signed_data();
     let init_signature = my_signing_keypair.sign(&init_signed_data);
 
+    // Reconstruct with the signature (constructor consumes — easier than mutating in place).
     let init = HandshakeInit::new(
-        *my_eph_public.as_bytes(),
-        my_signing_keypair.verifying_key().to_bytes(),
+        my_eph_public.to_bytes().to_vec(),
+        identity_pub_bytes,
         config.clone(),
         i_know_them,
         init_signature.to_vec(),
-    );
+    )
+    .context("Failed to build signed HandshakeInit")?;
 
-    // Send init
     let init_bytes = init.to_bytes()?;
     let init_wire = WireMessage::new(
-        1,
+        CHAT_PROTOCOL_VERSION,
         [0u8; 12],
         vec![],
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &init_bytes),
     );
     conn.send(&init_wire).await.context("Failed to send handshake")?;
 
-    // Receive response
+    // Receive response.
     let response_wire = conn.receive().await.context("Failed to receive handshake response")?;
     let response_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &response_wire.anyhide_code)
         .context("Failed to decode handshake response")?;
     let response = HandshakeResponse::from_bytes(&response_bytes)
         .context("Failed to parse handshake response")?;
+    response.validate().context("HandshakeResponse failed validation")?;
 
-    // Get their ephemeral public key
-    let their_eph_public = PublicKey::from(response.ephemeral_public);
+    // Decapsulate the responder's KEM ciphertext to recover ss_resp_to_init.
+    let response_kem_ct = parse_kem_ciphertext(&response.kem_ciphertext_to_initiator)
+        .context("Invalid KEM ciphertext in HandshakeResponse")?;
+    let ss_resp_to_init =
+        initiator_decapsulate_from_responder(&my_eph_secret, &response_kem_ct)
+            .context("Failed to decapsulate responder's KEM ciphertext")?;
 
-    // Negotiate config
+    // Encapsulate against the responder's ephemeral pubkey to derive ss_init_to_resp.
+    let their_eph_public = parse_peer_pubkey(&response.ephemeral_public_hybrid)
+        .context("Invalid responder ephemeral pubkey")?;
+    let (kem_ct_to_responder, ss_init_to_resp) =
+        initiator_encapsulate_to_responder(&their_eph_public)
+            .context("Failed to encapsulate to responder")?;
+
+    // Negotiate config.
     let agreed_config = config.negotiate(&response.config)
         .context("Carrier mode mismatch - both parties must use same mode (random or pre-shared with matching files)")?;
 
-    // Handle carriers based on mode
+    // Carriers: in v2 the responder's carriers are encrypted with a key derived
+    // from ss_resp_to_init; ours go out encrypted under ss_init_to_resp.
     let (my_carriers, their_carriers) = if agreed_config.is_preshared() {
-        // Pre-shared mode: use the same carriers for both parties
         let carriers = preshared_carriers
             .ok_or_else(|| anyhow::anyhow!("Pre-shared carriers required but not provided"))?
             .to_vec();
 
-        // In pre-shared mode, both parties use the same carriers
-        // We still need to send a complete message for protocol consistency
+        // Still send a Complete (with empty encrypted_carriers) so the responder
+        // can decapsulate ss_init_to_resp and finalize the master secret.
         let carrier_hash = hash_carriers(&carriers);
         let complete_signature = my_signing_keypair.sign(&carrier_hash);
-        let complete = HandshakeComplete::new(vec![], complete_signature.to_vec());
-
-        let complete_bytes = complete.to_bytes()?;
-        let complete_wire = WireMessage::new(
-            1,
-            [0u8; 12],
+        let complete = HandshakeComplete::new(
+            kem_ct_to_responder.to_bytes().to_vec(),
             vec![],
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
-        );
-        conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
+            complete_signature.to_vec(),
+        )
+        .context("Failed to build HandshakeComplete")?;
+        send_complete(conn, &complete).await?;
 
         (carriers.clone(), carriers)
     } else {
-        // Random mode: exchange carriers
-        let mut carrier_enc_key = [0u8; 32];
-        use hkdf::Hkdf;
-        use sha2::Sha256;
-        let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-        let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-        hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-            .expect("32 bytes is valid");
+        let resp_carrier_key = derive_handshake_carrier_key(&ss_resp_to_init, true);
+        let init_carrier_key = derive_handshake_carrier_key(&ss_init_to_resp, false);
 
-        // Decrypt their carriers
-        let their_carriers = decrypt_carriers(&response.encrypted_carriers, &carrier_enc_key)
+        let their_carriers = decrypt_carriers(&response.encrypted_carriers, &resp_carrier_key)
             .context("Failed to decrypt peer carriers")?;
 
-        // Generate and encrypt our carriers
-        let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-        let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+        let my_carriers =
+            generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+        let encrypted_carriers = encrypt_carriers(&my_carriers, &init_carrier_key)
             .context("Failed to encrypt carriers")?;
 
-        // Sign complete
         let carrier_hash = hash_carriers(&my_carriers);
         let complete_signature = my_signing_keypair.sign(&carrier_hash);
-        let complete = HandshakeComplete::new(encrypted_carriers, complete_signature.to_vec());
-
-        // Send complete
-        let complete_bytes = complete.to_bytes()?;
-        let complete_wire = WireMessage::new(
-            1,
-            [0u8; 12],
-            vec![],
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
-        );
-        conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
+        let complete = HandshakeComplete::new(
+            kem_ct_to_responder.to_bytes().to_vec(),
+            encrypted_carriers,
+            complete_signature.to_vec(),
+        )
+        .context("Failed to build HandshakeComplete")?;
+        send_complete(conn, &complete).await?;
 
         (my_carriers, their_carriers)
     };
 
-    // Determine mutual recognition for passphrase logic
-    // Passphrase is ONLY used if BOTH parties know each other
+    // Compute master secret and instantiate session.
+    let master = derive_master_secret(&ss_resp_to_init, &ss_init_to_resp);
+
     let they_know_us = response.i_know_you;
     let mutual_recognition = i_know_them && they_know_us;
     let effective_passphrase = if mutual_recognition { user_passphrase } else { "" };
 
-    // Create session (we are initiator)
     ChatSession::init_as_initiator(
         my_eph_secret,
         my_signing_keypair.signing_key(),
         their_eph_public,
         their_verifying_key,
+        &master,
         my_carriers,
         their_carriers,
         agreed_config,
@@ -1533,11 +1646,29 @@ async fn perform_initiator_handshake<T: MessageTransport>(
     .context("Failed to initialize session")
 }
 
-/// Perform handshake as responder (the one who accepted connection).
+/// Helper: serialize and send a HandshakeComplete to the transport.
+async fn send_complete<T: MessageTransport>(
+    conn: &mut T,
+    complete: &HandshakeComplete,
+) -> Result<()> {
+    let complete_bytes = complete.to_bytes()?;
+    let complete_wire = WireMessage::new(
+        CHAT_PROTOCOL_VERSION,
+        [0u8; 12],
+        vec![],
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
+    );
+    conn.send(&complete_wire)
+        .await
+        .context("Failed to send handshake complete")?;
+    Ok(())
+}
+
+/// Perform hybrid PQ handshake as responder (the one who accepted connection).
 async fn perform_responder_handshake<T: MessageTransport>(
     conn: &mut T,
-    my_eph_secret: StaticSecret,
-    my_eph_public: PublicKey,
+    my_eph_secret: HybridSecretKey,
+    my_eph_public: HybridPublicKey,
     my_signing_keypair: &SigningKeyPair,
     their_verifying_key: ed25519_dalek::VerifyingKey,
     proposed_config: ChatConfig,
@@ -1545,13 +1676,13 @@ async fn perform_responder_handshake<T: MessageTransport>(
     user_passphrase: &str,
     i_know_them: bool,
 ) -> Result<ChatSession> {
-    // Receive HandshakeInit
+    // Receive and validate HandshakeInit.
     let init_wire = conn.receive().await.context("Failed to receive handshake")?;
     let init_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &init_wire.anyhide_code)
         .context("Failed to decode handshake")?;
     let init = HandshakeInit::from_bytes(&init_bytes).context("Failed to parse handshake")?;
+    init.validate().context("HandshakeInit failed validation")?;
 
-    // Verify their signature
     let their_init_verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&init.identity_public)
         .context("Invalid identity public key")?;
     let init_signed_data = init.signed_data();
@@ -1561,132 +1692,102 @@ async fn perform_responder_handshake<T: MessageTransport>(
         .verify_strict(&init_signed_data, &init_signature)
         .context("Handshake signature verification failed")?;
 
-    // Negotiate config
     let agreed_config = proposed_config.negotiate(&init.config)
         .context("Carrier mode mismatch - both parties must use same mode (random or pre-shared with matching files)")?;
 
-    let their_eph_public = PublicKey::from(init.ephemeral_public);
+    // Decode initiator's hybrid ephemeral pubkey and encapsulate against it.
+    let their_eph_public = parse_peer_pubkey(&init.ephemeral_public_hybrid)
+        .context("Invalid initiator ephemeral pubkey")?;
+    let (kem_ct_to_initiator, ss_resp_to_init) =
+        responder_encapsulate_to_initiator(&their_eph_public)
+            .context("Failed to encapsulate to initiator")?;
 
-    // Handle carriers based on mode
-    let (my_carriers, their_carriers) = if agreed_config.is_preshared() {
-        // Pre-shared mode: use the same carriers for both parties
+    let my_eph_public_bytes = my_eph_public.to_bytes().to_vec();
+    let identity_pub_bytes = my_signing_keypair.verifying_key().to_bytes();
+
+    // Build & sign response. Carrier blob differs per mode.
+    let (my_carriers, encrypted_carriers_blob) = if agreed_config.is_preshared() {
         let carriers = preshared_carriers
             .ok_or_else(|| anyhow::anyhow!("Pre-shared carriers required but not provided"))?
             .to_vec();
-
-        // Sign response with carrier hash (including i_know_you flag)
-        let carrier_hash = hash_carriers(&carriers);
-        let response_data = {
-            let mut data = Vec::new();
-            data.push(1u8); // version
-            data.extend_from_slice(my_eph_public.as_bytes());
-            data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-            data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
-            data.push(if i_know_them { 1 } else { 0 }); // i_know_you flag
-            data.extend_from_slice(&carrier_hash);
-            data
-        };
-        let response_signature = my_signing_keypair.sign(&response_data);
-
-        // Send response (empty encrypted_carriers in preshared mode)
-        let response = HandshakeResponse::new(
-            *my_eph_public.as_bytes(),
-            my_signing_keypair.verifying_key().to_bytes(),
-            agreed_config.clone(),
-            i_know_them,
-            vec![],
-            response_signature.to_vec(),
-        );
-
-        let response_bytes = response.to_bytes()?;
-        let response_wire = WireMessage::new(
-            1,
-            [0u8; 12],
-            vec![],
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
-        );
-        conn.send(&response_wire).await.context("Failed to send handshake response")?;
-
-        // Receive HandshakeComplete (for protocol consistency)
-        let _complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
-
-        (carriers.clone(), carriers)
+        (carriers, vec![])
     } else {
-        // Random mode: generate and exchange carriers
-        let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-
-        // Derive carrier encryption key
-        let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-        let mut carrier_enc_key = [0u8; 32];
-        use hkdf::Hkdf;
-        use sha2::Sha256;
-        let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-        hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-            .expect("32 bytes is valid");
-
-        // Encrypt our carriers
-        let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+        let resp_carrier_key = derive_handshake_carrier_key(&ss_resp_to_init, true);
+        let my_carriers =
+            generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+        let encrypted = encrypt_carriers(&my_carriers, &resp_carrier_key)
             .context("Failed to encrypt carriers")?;
-
-        // Create and sign response (including i_know_you flag)
-        let carrier_hash = hash_carriers(&my_carriers);
-        let response_data = {
-            let mut data = Vec::new();
-            data.push(1u8); // version
-            data.extend_from_slice(my_eph_public.as_bytes());
-            data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-            data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
-            data.push(if i_know_them { 1 } else { 0 }); // i_know_you flag
-            data.extend_from_slice(&carrier_hash);
-            data
-        };
-        let response_signature = my_signing_keypair.sign(&response_data);
-
-        let response = HandshakeResponse::new(
-            *my_eph_public.as_bytes(),
-            my_signing_keypair.verifying_key().to_bytes(),
-            agreed_config.clone(),
-            i_know_them,
-            encrypted_carriers,
-            response_signature.to_vec(),
-        );
-
-        // Send response
-        let response_bytes = response.to_bytes()?;
-        let response_wire = WireMessage::new(
-            1,
-            [0u8; 12],
-            vec![],
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
-        );
-        conn.send(&response_wire).await.context("Failed to send handshake response")?;
-
-        // Receive HandshakeComplete
-        let complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
-        let complete_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &complete_wire.anyhide_code)
-            .context("Failed to decode handshake complete")?;
-        let complete = HandshakeComplete::from_bytes(&complete_bytes)
-            .context("Failed to parse handshake complete")?;
-
-        // Decrypt their carriers
-        let their_carriers = decrypt_carriers(&complete.encrypted_carriers, &carrier_enc_key)
-            .context("Failed to decrypt peer carriers")?;
-
-        (my_carriers, their_carriers)
+        (my_carriers, encrypted)
     };
 
-    // Determine mutual recognition for passphrase logic
-    // Passphrase is ONLY used if BOTH parties know each other
+    let carrier_hash = hash_carriers(&my_carriers);
+    let response_unsigned = HandshakeResponse::new(
+        my_eph_public_bytes.clone(),
+        identity_pub_bytes,
+        kem_ct_to_initiator.to_bytes().to_vec(),
+        agreed_config.clone(),
+        i_know_them,
+        encrypted_carriers_blob.clone(),
+        Vec::new(),
+    )
+    .context("Failed to build HandshakeResponse")?;
+    let response_signature = my_signing_keypair.sign(&response_unsigned.signed_data(&carrier_hash));
+
+    let response = HandshakeResponse::new(
+        my_eph_public_bytes,
+        identity_pub_bytes,
+        kem_ct_to_initiator.to_bytes().to_vec(),
+        agreed_config.clone(),
+        i_know_them,
+        encrypted_carriers_blob,
+        response_signature.to_vec(),
+    )
+    .context("Failed to build signed HandshakeResponse")?;
+
+    let response_bytes = response.to_bytes()?;
+    let response_wire = WireMessage::new(
+        CHAT_PROTOCOL_VERSION,
+        [0u8; 12],
+        vec![],
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
+    );
+    conn.send(&response_wire).await.context("Failed to send handshake response")?;
+
+    // Receive and validate HandshakeComplete; decapsulate to recover ss_init_to_resp.
+    let complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
+    let complete_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &complete_wire.anyhide_code)
+        .context("Failed to decode handshake complete")?;
+    let complete = HandshakeComplete::from_bytes(&complete_bytes)
+        .context("Failed to parse handshake complete")?;
+    complete.validate().context("HandshakeComplete failed validation")?;
+
+    let complete_kem_ct = parse_kem_ciphertext(&complete.kem_ciphertext_to_responder)
+        .context("Invalid KEM ciphertext in HandshakeComplete")?;
+    let ss_init_to_resp =
+        responder_decapsulate_from_initiator(&my_eph_secret, &complete_kem_ct)
+            .context("Failed to decapsulate initiator's KEM ciphertext")?;
+
+    // Decrypt initiator's carriers (random mode) or skip (preshared).
+    let their_carriers = if agreed_config.is_preshared() {
+        my_carriers.clone()
+    } else {
+        let init_carrier_key = derive_handshake_carrier_key(&ss_init_to_resp, false);
+        decrypt_carriers(&complete.encrypted_carriers, &init_carrier_key)
+            .context("Failed to decrypt peer carriers")?
+    };
+
+    let master = derive_master_secret(&ss_resp_to_init, &ss_init_to_resp);
+
     let they_know_us = init.i_know_you;
     let mutual_recognition = i_know_them && they_know_us;
     let effective_passphrase = if mutual_recognition { user_passphrase } else { "" };
 
-    // Create session (we are responder)
     ChatSession::init_as_responder(
         my_eph_secret,
         my_signing_keypair.signing_key(),
         their_eph_public,
         their_verifying_key,
+        &master,
         my_carriers,
         their_carriers,
         agreed_config,
@@ -2194,17 +2295,16 @@ async fn perform_accept_handshake(
         None // Unknown contact - will extract from handshake
     };
 
-    // Generate ephemeral keys for this session
-    let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let my_eph_public = PublicKey::from(&my_eph_secret);
+    // Generate hybrid ephemeral keypair for this session.
+    let (my_eph_secret, my_eph_public) = anyhide::crypto::hybrid_kem::generate_keypair();
 
-    // Default chat config (random carriers)
     let proposed_config = ChatConfig::default();
 
-    // HandshakeInit already received - get their verifying key from it if not known
+    // Validate the pre-received HandshakeInit and resolve identity.
+    init.validate().context("HandshakeInit failed validation")?;
+
     let their_verifying_key = match their_verifying_key {
         Some(key) => {
-            // Verify it matches the one in the handshake
             let handshake_key = ed25519_dalek::VerifyingKey::from_bytes(&init.identity_public)
                 .context("Invalid identity public key in handshake")?;
             if key != handshake_key {
@@ -2212,14 +2312,10 @@ async fn perform_accept_handshake(
             }
             key
         }
-        None => {
-            // Accept the key from handshake (unknown contact)
-            ed25519_dalek::VerifyingKey::from_bytes(&init.identity_public)
-                .context("Invalid identity public key")?
-        }
+        None => ed25519_dalek::VerifyingKey::from_bytes(&init.identity_public)
+            .context("Invalid identity public key")?,
     };
 
-    // Verify their signature
     let init_signed_data = init.signed_data();
     let init_signature = ed25519_dalek::Signature::from_slice(&init.signature)
         .context("Invalid signature format")?;
@@ -2227,94 +2323,98 @@ async fn perform_accept_handshake(
         .verify_strict(&init_signed_data, &init_signature)
         .context("Handshake signature verification failed")?;
 
-    // Try to find the contact by their signing key if not already known
     let resolved_contact_name = if let Some(name) = contact_name {
         Some(name.to_string())
     } else {
         config.find_contact_by_signing_key(&init.identity_public)
     };
 
-    // Negotiate config (always random carriers for multi-TUI for now)
-    let agreed_config = proposed_config.negotiate(&init.config)
+    let agreed_config = proposed_config
+        .negotiate(&init.config)
         .context("Carrier mode mismatch")?;
 
-    let their_eph_public = PublicKey::from(init.ephemeral_public);
+    // Decode initiator's hybrid ephemeral pubkey and encapsulate against it.
+    let their_eph_public = parse_peer_pubkey(&init.ephemeral_public_hybrid)
+        .context("Invalid initiator ephemeral pubkey")?;
+    let (kem_ct_to_initiator, ss_resp_to_init) =
+        responder_encapsulate_to_initiator(&their_eph_public)
+            .context("Failed to encapsulate to initiator")?;
 
-    // Generate and exchange carriers (random mode)
-    let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-
-    // Derive carrier encryption key
-    let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-    let mut carrier_enc_key = [0u8; 32];
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-    hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-        .expect("32 bytes is valid");
-
-    // Encrypt our carriers
-    let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+    // Random mode only here (multi-TUI does not support preshared yet).
+    let resp_carrier_key = derive_handshake_carrier_key(&ss_resp_to_init, true);
+    let my_carriers =
+        generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+    let encrypted_carriers = encrypt_carriers(&my_carriers, &resp_carrier_key)
         .context("Failed to encrypt carriers")?;
 
-    // Determine if we know the initiator (for mutual recognition)
     let i_know_them = is_known_contact;
-
-    // Create and sign response (including i_know_you flag)
     let carrier_hash = hash_carriers(&my_carriers);
-    let response_data = {
-        let mut data = Vec::new();
-        data.push(1u8); // version
-        data.extend_from_slice(my_eph_public.as_bytes());
-        data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-        data.extend_from_slice(&bincode::serialize(&agreed_config).unwrap());
-        data.push(if i_know_them { 1 } else { 0 }); // i_know_you flag
-        data.extend_from_slice(&carrier_hash);
-        data
-    };
-    let response_signature = my_signing_keypair.sign(&response_data);
+
+    let my_eph_public_bytes = my_eph_public.to_bytes().to_vec();
+    let identity_pub_bytes = my_signing_keypair.verifying_key().to_bytes();
+
+    let response_unsigned = HandshakeResponse::new(
+        my_eph_public_bytes.clone(),
+        identity_pub_bytes,
+        kem_ct_to_initiator.to_bytes().to_vec(),
+        agreed_config.clone(),
+        i_know_them,
+        encrypted_carriers.clone(),
+        Vec::new(),
+    )
+    .context("Failed to build HandshakeResponse")?;
+    let response_signature = my_signing_keypair.sign(&response_unsigned.signed_data(&carrier_hash));
 
     let response = HandshakeResponse::new(
-        *my_eph_public.as_bytes(),
-        my_signing_keypair.verifying_key().to_bytes(),
+        my_eph_public_bytes,
+        identity_pub_bytes,
+        kem_ct_to_initiator.to_bytes().to_vec(),
         agreed_config.clone(),
         i_know_them,
         encrypted_carriers,
         response_signature.to_vec(),
-    );
+    )
+    .context("Failed to build signed HandshakeResponse")?;
 
-    // Send response
     let response_bytes = response.to_bytes()?;
     let response_wire = WireMessage::new(
-        1,
+        CHAT_PROTOCOL_VERSION,
         [0u8; 12],
         vec![],
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &response_bytes),
     );
     conn.send(&response_wire).await.context("Failed to send handshake response")?;
 
-    // Receive HandshakeComplete
+    // Receive HandshakeComplete and decapsulate to recover ss_init_to_resp.
     let complete_wire = conn.receive().await.context("Failed to receive handshake complete")?;
     let complete_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &complete_wire.anyhide_code)
         .context("Failed to decode handshake complete")?;
     let complete = HandshakeComplete::from_bytes(&complete_bytes)
         .context("Failed to parse handshake complete")?;
+    complete.validate().context("HandshakeComplete failed validation")?;
 
-    // Decrypt their carriers
-    let their_carriers = decrypt_carriers(&complete.encrypted_carriers, &carrier_enc_key)
+    let complete_kem_ct = parse_kem_ciphertext(&complete.kem_ciphertext_to_responder)
+        .context("Invalid KEM ciphertext in HandshakeComplete")?;
+    let ss_init_to_resp =
+        responder_decapsulate_from_initiator(&my_eph_secret, &complete_kem_ct)
+            .context("Failed to decapsulate initiator's KEM ciphertext")?;
+
+    let init_carrier_key = derive_handshake_carrier_key(&ss_init_to_resp, false);
+    let their_carriers = decrypt_carriers(&complete.encrypted_carriers, &init_carrier_key)
         .context("Failed to decrypt peer carriers")?;
 
-    // Determine mutual recognition for passphrase logic
-    // Passphrase is ONLY used if BOTH parties know each other
+    let master = derive_master_secret(&ss_resp_to_init, &ss_init_to_resp);
+
     let they_know_us = init.i_know_you;
     let mutual_recognition = i_know_them && they_know_us;
     let effective_passphrase = if mutual_recognition { passphrase } else { "" };
 
-    // Create session (we are responder)
     let session = ChatSession::init_as_responder(
         my_eph_secret,
         my_signing_keypair.signing_key(),
         their_eph_public,
         their_verifying_key,
+        &master,
         my_carriers,
         their_carriers,
         agreed_config,
@@ -2349,105 +2449,98 @@ async fn perform_connect_handshake(
     let their_verifying_key = load_verifying_key(&contact.signing_key)
         .context("Failed to load contact's signing key")?;
 
-    // Generate ephemeral keys for this session
-    let my_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let my_eph_public = PublicKey::from(&my_eph_secret);
+    // Generate hybrid ephemeral keypair for this session.
+    let (my_eph_secret, my_eph_public) = anyhide::crypto::hybrid_kem::generate_keypair();
 
-    // Default chat config (random carriers)
     let chat_config = ChatConfig::default();
-
-    // We know them since they're in our contacts
     let i_know_them = true;
 
-    // Create and sign init (including i_know_you flag)
-    let init_signed_data = {
-        let mut data = Vec::new();
-        data.push(1u8); // version
-        data.extend_from_slice(my_eph_public.as_bytes());
-        data.extend_from_slice(&my_signing_keypair.verifying_key().to_bytes());
-        data.extend_from_slice(&bincode::serialize(&chat_config).unwrap());
-        data.push(if i_know_them { 1 } else { 0 }); // i_know_you flag
-        data
-    };
-    let init_signature = my_signing_keypair.sign(&init_signed_data);
+    let my_eph_public_bytes = my_eph_public.to_bytes().to_vec();
+    let identity_pub_bytes = my_signing_keypair.verifying_key().to_bytes();
+
+    let init_unsigned = HandshakeInit::new(
+        my_eph_public_bytes.clone(),
+        identity_pub_bytes,
+        chat_config.clone(),
+        i_know_them,
+        Vec::new(),
+    )
+    .context("Failed to build HandshakeInit")?;
+    let init_signature = my_signing_keypair.sign(&init_unsigned.signed_data());
 
     let init = HandshakeInit::new(
-        *my_eph_public.as_bytes(),
-        my_signing_keypair.verifying_key().to_bytes(),
+        my_eph_public_bytes,
+        identity_pub_bytes,
         chat_config.clone(),
         i_know_them,
         init_signature.to_vec(),
-    );
+    )
+    .context("Failed to build signed HandshakeInit")?;
 
-    // Send init
     let init_bytes = init.to_bytes()?;
     let init_wire = WireMessage::new(
-        1,
+        CHAT_PROTOCOL_VERSION,
         [0u8; 12],
         vec![],
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &init_bytes),
     );
     conn.send(&init_wire).await.context("Failed to send handshake")?;
 
-    // Receive response
     let response_wire = conn.receive().await.context("Failed to receive handshake response")?;
     let response_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &response_wire.anyhide_code)
         .context("Failed to decode handshake response")?;
     let response = HandshakeResponse::from_bytes(&response_bytes)
         .context("Failed to parse handshake response")?;
+    response.validate().context("HandshakeResponse failed validation")?;
 
-    // Get their ephemeral public key
-    let their_eph_public = PublicKey::from(response.ephemeral_public);
+    // Decapsulate the responder's KEM ciphertext.
+    let response_kem_ct = parse_kem_ciphertext(&response.kem_ciphertext_to_initiator)
+        .context("Invalid KEM ciphertext in HandshakeResponse")?;
+    let ss_resp_to_init =
+        initiator_decapsulate_from_responder(&my_eph_secret, &response_kem_ct)
+            .context("Failed to decapsulate responder's KEM ciphertext")?;
 
-    // Negotiate config
+    let their_eph_public = parse_peer_pubkey(&response.ephemeral_public_hybrid)
+        .context("Invalid responder ephemeral pubkey")?;
+    let (kem_ct_to_responder, ss_init_to_resp) =
+        initiator_encapsulate_to_responder(&their_eph_public)
+            .context("Failed to encapsulate to responder")?;
+
     let agreed_config = chat_config.negotiate(&response.config)
         .context("Carrier mode mismatch")?;
 
-    // Derive carrier encryption key
-    let temp_shared = my_eph_secret.diffie_hellman(&their_eph_public);
-    let mut carrier_enc_key = [0u8; 32];
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let hk = Hkdf::<Sha256>::new(None, temp_shared.as_bytes());
-    hk.expand(b"ANYHIDE-CHAT-CARRIER-ENC", &mut carrier_enc_key)
-        .expect("32 bytes is valid");
+    let resp_carrier_key = derive_handshake_carrier_key(&ss_resp_to_init, true);
+    let init_carrier_key = derive_handshake_carrier_key(&ss_init_to_resp, false);
 
-    // Decrypt their carriers
-    let their_carriers = decrypt_carriers(&response.encrypted_carriers, &carrier_enc_key)
+    let their_carriers = decrypt_carriers(&response.encrypted_carriers, &resp_carrier_key)
         .context("Failed to decrypt peer carriers")?;
-
-    // Generate and encrypt our carriers
-    let my_carriers = generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
-    let encrypted_carriers = encrypt_carriers(&my_carriers, &carrier_enc_key)
+    let my_carriers =
+        generate_carriers(agreed_config.carriers_per_party, agreed_config.carrier_size);
+    let encrypted_carriers = encrypt_carriers(&my_carriers, &init_carrier_key)
         .context("Failed to encrypt carriers")?;
 
-    // Sign complete
     let carrier_hash = hash_carriers(&my_carriers);
     let complete_signature = my_signing_keypair.sign(&carrier_hash);
-    let complete = HandshakeComplete::new(encrypted_carriers, complete_signature.to_vec());
+    let complete = HandshakeComplete::new(
+        kem_ct_to_responder.to_bytes().to_vec(),
+        encrypted_carriers,
+        complete_signature.to_vec(),
+    )
+    .context("Failed to build HandshakeComplete")?;
+    send_complete(conn, &complete).await?;
 
-    // Send complete
-    let complete_bytes = complete.to_bytes()?;
-    let complete_wire = WireMessage::new(
-        1,
-        [0u8; 12],
-        vec![],
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &complete_bytes),
-    );
-    conn.send(&complete_wire).await.context("Failed to send handshake complete")?;
+    let master = derive_master_secret(&ss_resp_to_init, &ss_init_to_resp);
 
-    // Determine mutual recognition for passphrase logic
-    // Passphrase is ONLY used if BOTH parties know each other
     let they_know_us = response.i_know_you;
     let mutual_recognition = i_know_them && they_know_us;
     let effective_passphrase = if mutual_recognition { passphrase } else { "" };
 
-    // Create session (we are initiator)
     ChatSession::init_as_initiator(
         my_eph_secret,
         my_signing_keypair.signing_key(),
         their_eph_public,
         their_verifying_key,
+        &master,
         my_carriers,
         their_carriers,
         agreed_config,
@@ -3025,9 +3118,13 @@ mod tests {
     // Format: base32(ed25519_pubkey || checksum || version) = 56 chars
     const TEST_ONION: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
 
+    fn dummy_enc_pubkey(byte: u8) -> Vec<u8> {
+        vec![byte; QR_ENC_PUBKEY_SIZE]
+    }
+
     #[test]
     fn test_encode_decode_chat_identity_roundtrip() {
-        let enc_pubkey = [1u8; 32];
+        let enc_pubkey = dummy_enc_pubkey(1);
         let sign_pubkey = [2u8; 32];
         let nickname = "alice";
 
@@ -3044,7 +3141,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_empty_nickname() {
-        let enc_pubkey = [0xAA; 32];
+        let enc_pubkey = dummy_enc_pubkey(0xAA);
         let sign_pubkey = [0xBB; 32];
         let nickname = "";
 
@@ -3061,7 +3158,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_long_nickname() {
-        let enc_pubkey = [0xCC; 32];
+        let enc_pubkey = dummy_enc_pubkey(0xCC);
         let sign_pubkey = [0xDD; 32];
         let nickname = "a".repeat(63); // Max length
 
@@ -3074,7 +3171,7 @@ mod tests {
 
     #[test]
     fn test_encode_nickname_too_long() {
-        let enc_pubkey = [0; 32];
+        let enc_pubkey = dummy_enc_pubkey(0);
         let sign_pubkey = [0; 32];
         let nickname = "a".repeat(64); // Too long
 
@@ -3083,9 +3180,25 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_rejects_wrong_pubkey_size() {
+        // Classical (32B) pubkey is no longer accepted by v2 encoder.
+        let bad_enc_pubkey = vec![1u8; 32];
+        let sign_pubkey = [0; 32];
+        let result = encode_chat_identity(TEST_ONION, &bad_enc_pubkey, &sign_pubkey, "alice");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_decode_invalid_magic() {
-        let data = b"XXXX\x01abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\x05alice";
-        let result = decode_chat_identity(data);
+        // Build a buffer with bad magic but otherwise correct shape (1216-byte enc key).
+        let mut data = b"XXXX".to_vec();
+        data.push(CHAT_QR_VERSION);
+        data.extend_from_slice(&[b'a'; QR_ONION_SIZE]);
+        data.extend_from_slice(&vec![0u8; QR_ENC_PUBKEY_SIZE]);
+        data.extend_from_slice(&[0u8; 32]);
+        data.push(0);
+
+        let result = decode_chat_identity(&data);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("wrong magic"));
     }
@@ -3095,9 +3208,9 @@ mod tests {
         let mut data = vec![];
         data.extend_from_slice(CHAT_QR_MAGIC);
         data.push(0xFF); // Invalid version
-        data.extend_from_slice(&[0u8; 56]); // onion
-        data.extend_from_slice(&[0u8; 32]); // enc key
-        data.extend_from_slice(&[0u8; 32]); // sign key
+        data.extend_from_slice(&[0u8; QR_ONION_SIZE]);
+        data.extend_from_slice(&vec![0u8; QR_ENC_PUBKEY_SIZE]);
+        data.extend_from_slice(&[0u8; 32]);
         data.push(0); // nick len
 
         let result = decode_chat_identity(&data);
@@ -3106,8 +3219,28 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_rejects_v1_qr() {
+        // Hand-craft a v1-shape QR (32-byte enc pubkey) and verify v2 decoder
+        // rejects it explicitly with the expected error message.
+        let mut data = vec![];
+        data.extend_from_slice(CHAT_QR_MAGIC);
+        data.push(0x01); // v1
+        data.extend_from_slice(&[b'a'; QR_ONION_SIZE]);
+        data.extend_from_slice(&[0u8; 32]); // v1 enc pubkey was 32B
+        data.extend_from_slice(&[0u8; 32]);
+        data.push(0);
+
+        let result = decode_chat_identity(&data);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Unsupported QR version"));
+        assert!(msg.contains("regenerate"));
+    }
+
+    #[test]
     fn test_decode_too_short() {
-        let data = b"AHID\x01short";
+        // Magic + v2 version byte but truncated body — must hit the body size check.
+        let data = b"AHID\x02short";
         let result = decode_chat_identity(data);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("too short"));
@@ -3115,61 +3248,65 @@ mod tests {
 
     #[test]
     fn test_chat_qr_format_size() {
-        // Verify the format fits in QR code capacity
-        let enc_pubkey = [0xDE; 32];
+        // Hybrid PQ format is much larger than v1 — verify the size matches
+        // expectations and stays under the practical QR limits.
+        let enc_pubkey = dummy_enc_pubkey(0xDE);
         let sign_pubkey = [0xAD; 32];
         let nickname = "maximum-length-nickname-that-is-quite-long";
 
         let data = encode_chat_identity(TEST_ONION, &enc_pubkey, &sign_pubkey, nickname).unwrap();
 
-        // Format: magic(4) + version(1) + onion(56) + enc(32) + sign(32) + nick_len(1) + nick
-        let expected_size = 4 + 1 + 56 + 32 + 32 + 1 + nickname.len();
+        // Format: magic(4) + version(1) + onion(56) + enc(1216) + sign(32) + nick_len(1) + nick
+        let expected_size = 4 + 1 + QR_ONION_SIZE + QR_ENC_PUBKEY_SIZE + 32 + 1 + nickname.len();
         assert_eq!(data.len(), expected_size);
 
-        // Should fit easily in QR Version 10 (capacity ~914 bytes in binary mode L)
-        assert!(data.len() < 900);
+        // Hybrid identity is ~1.3 KB raw — beyond the 900-byte v1 budget but
+        // within QR Version 40 binary capacity (~2953 bytes at error correction L).
+        assert!(data.len() < 1500);
     }
 
     // ==========================================================================
     // Ephemeral Contact Tests
     // ==========================================================================
 
+    fn hybrid_hex(byte: u8) -> String {
+        hex::encode(vec![byte; anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE])
+    }
+
     #[test]
     fn test_parse_ephemeral_from_args_valid() {
         let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
-        let pubkey_hex = "0101010101010101010101010101010101010101010101010101010101010101";
+        let pubkey_hex = hybrid_hex(0x01);
         let sign_key_hex = "0202020202020202020202020202020202020202020202020202020202020202";
 
-        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+        let contact = parse_ephemeral_from_args(onion, &pubkey_hex, sign_key_hex).unwrap();
 
         assert_eq!(contact.onion_address, onion);
-        assert_eq!(contact.public_key, [1u8; 32]);
+        assert_eq!(contact.public_key, vec![1u8; anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE]);
         assert_eq!(contact.signing_key, [2u8; 32]);
     }
 
     #[test]
     fn test_parse_ephemeral_from_args_without_onion_suffix() {
         let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx";
-        let pubkey_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let pubkey_hex = hybrid_hex(0xAA);
         let sign_key_hex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+        let contact = parse_ephemeral_from_args(onion, &pubkey_hex, sign_key_hex).unwrap();
 
-        // Should add .onion suffix
         assert_eq!(contact.onion_address, format!("{}.onion", onion));
-        assert_eq!(contact.public_key, [0xAA; 32]);
+        assert_eq!(contact.public_key.len(), anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE);
         assert_eq!(contact.signing_key, [0xBB; 32]);
     }
 
     #[test]
     fn test_parse_ephemeral_from_args_with_port() {
         let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:9999";
-        let pubkey_hex = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let pubkey_hex = hybrid_hex(0xCC);
         let sign_key_hex = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
-        let contact = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex).unwrap();
+        let contact = parse_ephemeral_from_args(onion, &pubkey_hex, sign_key_hex).unwrap();
 
-        // Should strip port
         assert_eq!(contact.onion_address, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion");
     }
 
@@ -3185,23 +3322,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ephemeral_from_args_wrong_pubkey_length() {
+    fn test_parse_ephemeral_from_args_rejects_classical_pubkey_size() {
+        // 32-byte pubkey is the v1 size; v2 wants 1216 bytes (hybrid). The
+        // error must be specific so the user knows what to do.
         let onion = "test.onion";
-        let pubkey_hex = "0101010101"; // Too short (5 bytes)
+        let pubkey_hex = "0101010101010101010101010101010101010101010101010101010101010101"; // 32B = old v1 size
         let sign_key_hex = "0202020202020202020202020202020202020202020202020202020202020202";
 
         let result = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be 32 bytes"));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("1216 bytes"));
+        assert!(msg.contains("--from-qr"));
     }
 
     #[test]
     fn test_parse_ephemeral_from_args_invalid_sign_key_hex() {
         let onion = "test.onion";
-        let pubkey_hex = "0101010101010101010101010101010101010101010101010101010101010101";
+        let pubkey_hex = hybrid_hex(0x01);
         let sign_key_hex = "not_valid_hex";
 
-        let result = parse_ephemeral_from_args(onion, pubkey_hex, sign_key_hex);
+        let result = parse_ephemeral_from_args(onion, &pubkey_hex, sign_key_hex);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid --sign-key"));
     }
@@ -3210,12 +3351,12 @@ mod tests {
     fn test_ephemeral_contact_struct() {
         let contact = EphemeralContact {
             onion_address: "test.onion".to_string(),
-            public_key: [0xAA; 32],
+            public_key: vec![0xAA; anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE],
             signing_key: [0xBB; 32],
         };
 
         assert_eq!(contact.onion_address, "test.onion");
-        assert_eq!(contact.public_key.len(), 32);
+        assert_eq!(contact.public_key.len(), anyhide::crypto::hybrid_kem::HYBRID_PUBKEY_SIZE);
         assert_eq!(contact.signing_key.len(), 32);
     }
 }

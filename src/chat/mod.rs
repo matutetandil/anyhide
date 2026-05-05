@@ -22,7 +22,7 @@ pub mod transport;
 pub mod tui;
 
 pub use carrier::{generate_carriers, MIN_CARRIER_SIZE};
-pub use config::{CarrierMode, ChatConfig};
+pub use config::{CarrierMode, ChatConfig, CHAT_PROTOCOL_VERSION};
 pub use error::ChatError;
 pub use protocol::{
     HandshakeComplete, HandshakeInit, HandshakeResponse, MessageHeader, SignedMessage, WireMessage,

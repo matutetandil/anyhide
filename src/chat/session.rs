@@ -1,20 +1,30 @@
-//! Chat session management with zeroize.
+//! Chat session management with zeroize (hybrid post-quantum, v2).
 //!
 //! The `ChatSession` struct holds all cryptographic state for an active chat.
 //! All sensitive data is automatically zeroized when the session is dropped.
+//!
+//! In v2 the long-term and ephemeral encryption keys are hybrid (X25519 + ML-KEM-768
+//! via [`HybridKeyPair`]) and the DH ratchet is replaced by a KEM ratchet
+//! (see [`crate::chat::protocol::kem_ratchet_send`] and
+//! [`crate::chat::protocol::kem_ratchet_receive`]). Identity signing remains
+//! Ed25519 — the harvest-now-decrypt-later threat does not apply to authentication
+//! the same way it does to confidentiality.
 
 use std::collections::HashMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 use zeroize::Zeroize;
 
 use crate::chat::config::{ChatConfig, CHAT_PROTOCOL_VERSION};
 use crate::chat::error::ChatError;
 use crate::chat::protocol::{
-    advance_carrier_chain, derive_session_keys, dh_ratchet,
-    decrypt_header, encrypt_header, kdf_chain, MessageHeader, SignedMessage, WireMessage,
+    advance_carrier_chain, decrypt_header, derive_session_keys, encrypt_header, kdf_chain,
+    kem_ratchet_receive, kem_ratchet_send, MessageHeader, SignedMessage, WireMessage,
+};
+use crate::crypto::hybrid_kem::{
+    HybridCiphertext, HybridPublicKey, HybridSecretKey, HYBRID_PUBKEY_SIZE,
 };
 use crate::text::carrier::Carrier;
 use crate::{decode_bytes_with_carrier, encode_bytes_with_carrier};
@@ -39,96 +49,80 @@ pub enum Role {
 
 /// RAM-only chat session state.
 ///
-/// All sensitive cryptographic material is zeroized on drop.
+/// All sensitive cryptographic material is zeroized on drop. The hybrid keys
+/// (`HybridSecretKey`) zeroize themselves via the underlying `x25519-dalek` and
+/// `ml-kem` crates' Drop impls; this struct's Drop only handles the raw byte
+/// arrays for chains, passphrases, signing key, carriers, and skipped keys.
 pub struct ChatSession {
-    // === Key Material ===
-    /// Header encryption key (derived from initial DH).
+    // === Chain keys ===
+    /// Header encryption key (derived from initial handshake).
     header_key: [u8; 32],
-
     /// Current sending chain key.
     send_chain: [u8; 32],
-
     /// Current receiving chain key.
     recv_chain: [u8; 32],
-
     /// Carrier chain key for selecting carriers.
     carrier_chain: [u8; 32],
 
-    /// My current DH private key bytes.
-    my_dh_secret: [u8; 32],
+    // === Hybrid ratchet state ===
+    /// My current hybrid ratchet secret key (zeroizes via x25519-dalek + ml-kem).
+    my_hybrid_secret: HybridSecretKey,
+    /// My current hybrid ratchet public key (1216 bytes when serialized).
+    my_hybrid_public: HybridPublicKey,
+    /// Their current hybrid ratchet public key.
+    their_hybrid_public: HybridPublicKey,
+    /// KEM ciphertext to attach to the next outgoing message — populated by
+    /// `perform_kem_ratchet` and consumed on the first `send_message` after.
+    pending_kem_ct: Option<HybridCiphertext>,
 
-    /// My current DH public key bytes.
-    my_dh_public: [u8; 32],
-
-    /// Their current DH public key bytes.
-    their_dh_public: [u8; 32],
-
-    /// User-provided passphrase (hashed).
+    // === Session passphrases ===
+    /// User-provided passphrase (hashed to 32 bytes).
     user_passphrase: [u8; 32],
-
-    /// Derived passphrase component (from DH).
+    /// Derived passphrase from the handshake master secret.
     derived_passphrase: [u8; 32],
-
-    /// My Ed25519 signing key bytes.
+    /// My Ed25519 signing key bytes (independent of the hybrid encryption identity).
     my_signing_key: [u8; 32],
 
-    // === Sequence Numbers ===
-    /// Next sequence number to send.
+    // === Sequence numbers ===
     send_seq: u32,
-
-    /// Expected next sequence number to receive.
     recv_seq: u32,
-
-    /// Previous chain length (for out-of-order handling).
     prev_chain_len: u32,
-
-    /// Last direction of message flow (for ratchet).
     last_direction: Option<Direction>,
 
-    // === Skipped Message Keys ===
-    /// Cache of skipped message keys for out-of-order delivery.
-    /// Key: (dh_pub_bytes, seq), Value: message_key
+    // === Skipped message keys ===
+    /// Cache of skipped message keys keyed by the X25519 component of the
+    /// hybrid pubkey (32 bytes — small and unique per ratchet step) plus seq.
     skipped_keys: HashMap<([u8; 32], u32), [u8; 32]>,
 
     // === Carriers ===
-    /// My carriers (initiator = 0, responder = 1).
     my_carriers: Vec<Vec<u8>>,
-
-    /// Their carriers.
     their_carriers: Vec<Vec<u8>>,
 
     // === Identity ===
-    /// Their Ed25519 verifying key.
     their_verifying_key: VerifyingKey,
 
     // === Config ===
     config: ChatConfig,
-
-    /// My role in the session.
     role: Role,
 }
 
 impl Drop for ChatSession {
     fn drop(&mut self) {
-        // Zeroize all sensitive key material
+        // The hybrid keys' zeroize is handled by their own Drop impls; here
+        // we wipe everything else that holds raw key material.
         self.header_key.zeroize();
         self.send_chain.zeroize();
         self.recv_chain.zeroize();
         self.carrier_chain.zeroize();
-        self.my_dh_secret.zeroize();
-        self.my_dh_public.zeroize();
-        self.their_dh_public.zeroize();
         self.user_passphrase.zeroize();
         self.derived_passphrase.zeroize();
         self.my_signing_key.zeroize();
 
-        // Zeroize skipped message keys
         for (_, key) in self.skipped_keys.drain() {
             let mut key_copy = key;
             key_copy.zeroize();
         }
 
-        // Zeroize carriers
         for carrier in &mut self.my_carriers {
             carrier.zeroize();
         }
@@ -139,41 +133,31 @@ impl Drop for ChatSession {
 }
 
 impl ChatSession {
-    /// Create a new session as the initiator.
+    /// Creates a new session as the initiator after a successful hybrid handshake.
     ///
-    /// # Arguments
+    /// `master_secret` is the 32-byte output of [`derive_master_secret`] over the
+    /// two KEM shared secrets exchanged during the handshake.
     ///
-    /// * `my_ephemeral_secret` - Our ephemeral X25519 secret key.
-    /// * `my_signing_key` - Our Ed25519 signing key.
-    /// * `their_ephemeral_public` - Their ephemeral X25519 public key.
-    /// * `their_verifying_key` - Their Ed25519 verifying key.
-    /// * `my_carriers` - Carriers we generated.
-    /// * `their_carriers` - Carriers they sent.
-    /// * `config` - Negotiated session configuration.
-    /// * `user_passphrase` - User-provided passphrase.
+    /// [`derive_master_secret`]: crate::chat::protocol::derive_master_secret
     pub fn init_as_initiator(
-        my_ephemeral_secret: StaticSecret,
+        my_ephemeral_secret: HybridSecretKey,
         my_signing_key: &SigningKey,
-        their_ephemeral_public: PublicKey,
+        their_ephemeral_public: HybridPublicKey,
         their_verifying_key: VerifyingKey,
+        master_secret: &[u8; 32],
         my_carriers: Vec<Vec<u8>>,
         their_carriers: Vec<Vec<u8>>,
         config: ChatConfig,
         user_passphrase: &str,
     ) -> Result<Self, ChatError> {
-        let my_public = PublicKey::from(&my_ephemeral_secret);
+        let my_public = my_ephemeral_secret.public_key();
 
-        // DH shared secret
-        let shared_secret = my_ephemeral_secret.diffie_hellman(&their_ephemeral_public);
-
-        // Derive session keys (initiator's pubkey first)
         let session_keys = derive_session_keys(
-            shared_secret.as_bytes(),
-            my_public.as_bytes(),
-            their_ephemeral_public.as_bytes(),
+            master_secret,
+            &my_public.to_bytes(),
+            &their_ephemeral_public.to_bytes(),
         );
 
-        // Hash the user passphrase
         let mut user_pass_hash = [0u8; 32];
         let mut hasher = Sha256::new();
         hasher.update(user_passphrase.as_bytes());
@@ -184,9 +168,10 @@ impl ChatSession {
             send_chain: session_keys.send_chain,
             recv_chain: session_keys.recv_chain,
             carrier_chain: session_keys.carrier_chain,
-            my_dh_secret: my_ephemeral_secret.to_bytes(),
-            my_dh_public: *my_public.as_bytes(),
-            their_dh_public: *their_ephemeral_public.as_bytes(),
+            my_hybrid_secret: my_ephemeral_secret,
+            my_hybrid_public: my_public,
+            their_hybrid_public: their_ephemeral_public,
+            pending_kem_ct: None,
             user_passphrase: user_pass_hash,
             derived_passphrase: session_keys.passphrase,
             my_signing_key: my_signing_key.to_bytes(),
@@ -203,44 +188,45 @@ impl ChatSession {
         })
     }
 
-    /// Create a new session as the responder.
+    /// Creates a new session as the responder after a successful hybrid handshake.
+    ///
+    /// The responder swaps `send_chain` and `recv_chain` so both parties end up
+    /// with matching chain keys for their respective directions.
     pub fn init_as_responder(
-        my_ephemeral_secret: StaticSecret,
+        my_ephemeral_secret: HybridSecretKey,
         my_signing_key: &SigningKey,
-        their_ephemeral_public: PublicKey,
+        their_ephemeral_public: HybridPublicKey,
         their_verifying_key: VerifyingKey,
+        master_secret: &[u8; 32],
         my_carriers: Vec<Vec<u8>>,
         their_carriers: Vec<Vec<u8>>,
         config: ChatConfig,
         user_passphrase: &str,
     ) -> Result<Self, ChatError> {
-        let my_public = PublicKey::from(&my_ephemeral_secret);
+        let my_public = my_ephemeral_secret.public_key();
 
-        // DH shared secret
-        let shared_secret = my_ephemeral_secret.diffie_hellman(&their_ephemeral_public);
-
-        // Derive session keys (initiator's pubkey first, so their pubkey first for responder)
+        // Initiator's pubkey first — same as the initiator's derivation, so both
+        // parties compute identical chain keys.
         let session_keys = derive_session_keys(
-            shared_secret.as_bytes(),
-            their_ephemeral_public.as_bytes(),
-            my_public.as_bytes(),
+            master_secret,
+            &their_ephemeral_public.to_bytes(),
+            &my_public.to_bytes(),
         );
 
-        // Hash the user passphrase
         let mut user_pass_hash = [0u8; 32];
         let mut hasher = Sha256::new();
         hasher.update(user_passphrase.as_bytes());
         user_pass_hash.copy_from_slice(&hasher.finalize());
 
-        // Responder swaps send/recv chains
         Ok(Self {
             header_key: session_keys.header_key,
-            send_chain: session_keys.recv_chain, // Swapped
-            recv_chain: session_keys.send_chain, // Swapped
+            send_chain: session_keys.recv_chain, // swapped
+            recv_chain: session_keys.send_chain, // swapped
             carrier_chain: session_keys.carrier_chain,
-            my_dh_secret: my_ephemeral_secret.to_bytes(),
-            my_dh_public: *my_public.as_bytes(),
-            their_dh_public: *their_ephemeral_public.as_bytes(),
+            my_hybrid_secret: my_ephemeral_secret,
+            my_hybrid_public: my_public,
+            their_hybrid_public: their_ephemeral_public,
+            pending_kem_ct: None,
             user_passphrase: user_pass_hash,
             derived_passphrase: session_keys.passphrase,
             my_signing_key: my_signing_key.to_bytes(),
@@ -257,37 +243,29 @@ impl ChatSession {
         })
     }
 
-    /// Get the session configuration.
     pub fn config(&self) -> &ChatConfig {
         &self.config
     }
 
-    /// Get our role in the session.
     pub fn role(&self) -> Role {
         self.role
     }
 
-    /// Get the number of messages sent.
     pub fn messages_sent(&self) -> u32 {
         self.send_seq
     }
 
-    /// Get the number of messages received.
     pub fn messages_received(&self) -> u32 {
         self.recv_seq
     }
 
-    /// Send a message.
+    /// Sends a message.
     ///
-    /// # Arguments
-    ///
-    /// * `plaintext` - The message to send.
-    ///
-    /// # Returns
-    ///
-    /// A `WireMessage` ready to be sent over the transport.
+    /// Generates a `WireMessage` ready for the transport. If the previous action
+    /// was receiving, performs a sender-side KEM ratchet (new hybrid keypair +
+    /// encapsulation against peer's pubkey) and attaches the resulting ciphertext
+    /// to the outgoing header.
     pub fn send_message(&mut self, plaintext: &str) -> Result<WireMessage, ChatError> {
-        // Validate message length
         if plaintext.len() > self.config.max_message_len {
             return Err(ChatError::EncodingFailed(format!(
                 "Message too long: {} > {}",
@@ -296,23 +274,19 @@ impl ChatSession {
             )));
         }
 
-        // Check if we need to DH ratchet (direction changed to sending)
         if self.last_direction == Some(Direction::Receiving) {
-            self.perform_dh_ratchet()?;
+            self.perform_kem_ratchet()?;
         }
 
-        // Derive message key from send chain
         let (new_chain, message_key) = kdf_chain(&self.send_chain);
         self.send_chain = new_chain;
 
-        // Select carrier deterministically from carrier chain
         let (new_carrier_chain, carrier_owner, carrier_index) =
             advance_carrier_chain(&self.carrier_chain, self.config.carriers_per_party);
         self.carrier_chain = new_carrier_chain;
 
         let carrier = self.get_carrier(carrier_owner, carrier_index)?;
 
-        // Sign the message with Ed25519
         let signing_key = SigningKey::from_bytes(&self.my_signing_key);
         let mut hasher = Sha256::new();
         hasher.update(plaintext.as_bytes());
@@ -320,38 +294,43 @@ impl ChatSession {
         let msg_hash = hasher.finalize();
         let signature = signing_key.sign(&msg_hash);
 
-        // Create signed message
-        let signed_message = SignedMessage::new(plaintext.to_string(), signature.to_bytes().to_vec());
+        let signed_message =
+            SignedMessage::new(plaintext.to_string(), signature.to_bytes().to_vec());
         let signed_bytes = signed_message
             .to_bytes()
             .map_err(|e| ChatError::SerializationFailed(e.to_string()))?;
 
-        // Combine user passphrase with derived passphrase and message key
         let msg_passphrase = self.combine_passphrases(&message_key);
 
-        // Create a temporary keypair for anyhide encoding
-        // We use the message key to derive deterministic keys
-        let msg_secret = StaticSecret::from(message_key);
-        let msg_public = PublicKey::from(&msg_secret);
+        // Per-message ephemeral encryption keypair (X25519 only — the per-message
+        // anyhide encoding does not need to be hybrid because confidentiality
+        // already comes from the chain key + passphrase; this keypair only
+        // identifies the encoding).
+        let msg_secret = X25519Secret::from(message_key);
+        let msg_public = X25519PublicKey::from(&msg_secret);
 
-        // Encode with anyhide using binary carrier
         let binary_carrier = Carrier::from_bytes(carrier.clone());
-        let encoded = encode_bytes_with_carrier(&binary_carrier, &signed_bytes, &msg_passphrase, &msg_public)
-            .map_err(|e| ChatError::EncodingFailed(e.to_string()))?;
+        let encoded =
+            encode_bytes_with_carrier(&binary_carrier, &signed_bytes, &msg_passphrase, &msg_public)
+                .map_err(|e| ChatError::EncodingFailed(e.to_string()))?;
 
-        // Build header
+        // Consume any pending KEM ciphertext from the most recent ratchet step.
+        let kem_ct_bytes = self
+            .pending_kem_ct
+            .take()
+            .map(|ct| ct.to_bytes().to_vec());
+
         let header = MessageHeader {
             seq: self.send_seq,
-            dh_public: self.my_dh_public,
+            dh_public_hybrid: self.my_hybrid_public.to_bytes().to_vec(),
+            kem_ciphertext: kem_ct_bytes,
             carrier_owner,
             carrier_index,
             prev_chain_len: self.prev_chain_len,
         };
 
-        // Encrypt header
         let (encrypted_header, header_nonce) = encrypt_header(&header, &self.header_key)?;
 
-        // Update state
         self.send_seq += 1;
         self.last_direction = Some(Direction::Sending);
 
@@ -363,17 +342,8 @@ impl ChatSession {
         ))
     }
 
-    /// Receive and decrypt a message.
-    ///
-    /// # Arguments
-    ///
-    /// * `wire` - The received wire message.
-    ///
-    /// # Returns
-    ///
-    /// The decrypted plaintext message.
+    /// Receives and decrypts a message.
     pub fn receive_message(&mut self, wire: &WireMessage) -> Result<String, ChatError> {
-        // Check version
         if wire.version != CHAT_PROTOCOL_VERSION {
             return Err(ChatError::VersionMismatch {
                 expected: CHAT_PROTOCOL_VERSION,
@@ -381,47 +351,70 @@ impl ChatSession {
             });
         }
 
-        // Decrypt header
         let header = decrypt_header(&wire.encrypted_header, &wire.header_nonce, &self.header_key)?;
 
-        // Check if DH ratchet needed (their key changed)
-        if header.dh_public != self.their_dh_public {
-            self.handle_their_ratchet(&header.dh_public, header.prev_chain_len)?;
+        let header_pubkey_bytes: [u8; HYBRID_PUBKEY_SIZE] = header
+            .dh_public_hybrid
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                ChatError::SerializationFailed("Header pubkey size mismatch".to_string())
+            })?;
+
+        let their_current_bytes = self.their_hybrid_public.to_bytes();
+        let their_x25519_id = current_x25519_identifier(&self.their_hybrid_public);
+
+        // Detect ratchet step: peer published a new pubkey we haven't seen yet.
+        if header_pubkey_bytes != their_current_bytes {
+            let kem_ct_bytes = header
+                .kem_ciphertext
+                .as_ref()
+                .ok_or_else(|| {
+                    ChatError::SerializationFailed(
+                        "Ratchet step header missing kem_ciphertext".to_string(),
+                    )
+                })?;
+
+            self.handle_their_ratchet(&header_pubkey_bytes, kem_ct_bytes, header.prev_chain_len)?;
         }
 
-        // Handle out-of-order messages
+        // Once `handle_their_ratchet` has run, `their_hybrid_public` matches the header
+        // value. Re-derive its X25519 identifier for skipped-key bookkeeping.
+        let their_x25519_now = current_x25519_identifier(&self.their_hybrid_public);
+
         let message_key = if header.seq == self.recv_seq {
-            // Expected message - derive from chain
             let (new_chain, message_key) = kdf_chain(&self.recv_chain);
             self.recv_chain = new_chain;
             self.recv_seq += 1;
             message_key
         } else if header.seq > self.recv_seq {
-            // Future message - skip ahead and cache intermediate keys
-            self.skip_message_keys(header.seq, &header.dh_public)?
+            self.skip_message_keys(header.seq, &their_x25519_now)?
         } else {
-            // Past message - check cache
-            self.get_skipped_key(&header.dh_public, header.seq)?
+            // Past message — try the cache. For pre-ratchet messages stored under
+            // the previous identifier, fall back to that one too.
+            self.skipped_keys
+                .remove(&(their_x25519_now, header.seq))
+                .or_else(|| self.skipped_keys.remove(&(their_x25519_id, header.seq)))
+                .ok_or(ChatError::SkippedKeyNotFound(header.seq))?
         };
 
-        // Get carrier
         let carrier = self.get_carrier(header.carrier_owner, header.carrier_index)?;
 
-        // Combine user passphrase with derived passphrase and message key
         let msg_passphrase = self.combine_passphrases(&message_key);
 
-        // Create temporary keypair for decoding
-        let msg_secret = StaticSecret::from(message_key);
+        let msg_secret = X25519Secret::from(message_key);
 
-        // Decode with anyhide
         let binary_carrier = Carrier::from_bytes(carrier.clone());
-        let decoded = decode_bytes_with_carrier(&wire.anyhide_code, &binary_carrier, &msg_passphrase, &msg_secret);
+        let decoded = decode_bytes_with_carrier(
+            &wire.anyhide_code,
+            &binary_carrier,
+            &msg_passphrase,
+            &msg_secret,
+        );
 
-        // Deserialize signed message
         let signed_message = SignedMessage::from_bytes(&decoded.data)
             .map_err(|e| ChatError::DecodingFailed(e.to_string()))?;
 
-        // Verify Ed25519 signature
         let mut hasher = Sha256::new();
         hasher.update(signed_message.content.as_bytes());
         hasher.update(&header.seq.to_le_bytes());
@@ -434,66 +427,66 @@ impl ChatSession {
             .verify(&msg_hash, &signature)
             .map_err(|_| ChatError::SignatureVerificationFailed)?;
 
-        // Update state
         self.last_direction = Some(Direction::Receiving);
 
         Ok(signed_message.content)
     }
 
-    /// Perform DH ratchet when we switch from receiving to sending.
+    /// Performs a sender-side KEM ratchet when we switch from receiving to sending.
     ///
-    /// This generates a new DH keypair and derives a new send_chain.
-    /// The recv_chain is NOT updated here - it will be updated by handle_their_ratchet
-    /// when the peer responds with their ratchet step.
-    fn perform_dh_ratchet(&mut self) -> Result<(), ChatError> {
-        let their_public = PublicKey::from(self.their_dh_public);
-        let output = dh_ratchet(&their_public, &self.send_chain);
+    /// Generates a fresh hybrid keypair and encapsulates against the peer's
+    /// current pubkey. The new send chain is mixed with the resulting shared
+    /// secret. The KEM ciphertext is stashed in `pending_kem_ct` and attached
+    /// to the next outgoing message header.
+    fn perform_kem_ratchet(&mut self) -> Result<(), ChatError> {
+        let output = kem_ratchet_send(&self.their_hybrid_public, &self.send_chain)
+            .map_err(|e| ChatError::HeaderCryptoFailed(format!("KEM ratchet failed: {}", e)))?;
 
         self.prev_chain_len = self.send_seq;
         self.send_seq = 0;
 
-        self.my_dh_secret = output.new_secret;
-        self.my_dh_public = output.new_public;
+        // Replace my secret/public with the freshly generated pair. The previous
+        // secret is dropped here, which zeroizes via HybridSecretKey's Drop impls.
+        self.my_hybrid_secret = output.new_secret;
+        self.my_hybrid_public = output.new_public;
         self.send_chain = output.send_chain;
-        // NOTE: Do NOT update recv_chain here. It is only updated when we receive
-        // a message with a new DH public key from the peer (in handle_their_ratchet).
+        self.pending_kem_ct = Some(output.kem_ciphertext);
 
         Ok(())
     }
 
-    /// Handle their DH ratchet when we receive a new public key.
+    /// Handles their KEM ratchet when we receive a message with a new pubkey + ct.
     fn handle_their_ratchet(
         &mut self,
-        new_their_public: &[u8; 32],
+        new_their_public_bytes: &[u8; HYBRID_PUBKEY_SIZE],
+        kem_ct_bytes: &[u8],
         prev_chain_len: u32,
     ) -> Result<(), ChatError> {
-        // Skip any remaining message keys from the old chain
+        // Skip any remaining message keys from the old chain (under the previous
+        // their_x25519 identifier).
         self.skip_remaining_keys(prev_chain_len)?;
 
-        // Update their public key
-        self.their_dh_public = *new_their_public;
+        let new_their_public = HybridPublicKey::from_bytes(new_their_public_bytes)
+            .map_err(|e| ChatError::SerializationFailed(format!("Invalid hybrid pubkey: {}", e)))?;
 
-        // Perform our side of the ratchet
-        let their_public = PublicKey::from(*new_their_public);
-        let my_secret = StaticSecret::from(self.my_dh_secret);
-        let dh_output = my_secret.diffie_hellman(&their_public);
+        let kem_ct = HybridCiphertext::from_bytes(kem_ct_bytes)
+            .map_err(|e| ChatError::SerializationFailed(format!("Invalid kem_ct: {}", e)))?;
 
-        // Derive new recv chain using SEND label (to match sender's send_chain derivation)
-        // The sender derives send_chain with "SEND" label, so receiver must use same label
-        // for recv_chain to get the matching key.
-        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&self.recv_chain), dh_output.as_bytes());
-        let mut new_recv_chain = [0u8; 32];
-        hk.expand(b"ANYHIDE-CHAT-SEND", &mut new_recv_chain)
-            .expect("32 bytes is valid");
+        let new_recv_chain = kem_ratchet_receive(&self.my_hybrid_secret, &kem_ct, &self.recv_chain)
+            .map_err(|e| {
+                ChatError::HeaderCryptoFailed(format!("KEM ratchet decapsulation failed: {}", e))
+            })?;
 
+        self.their_hybrid_public = new_their_public;
         self.recv_chain = new_recv_chain;
         self.recv_seq = 0;
 
         Ok(())
     }
 
-    /// Skip remaining keys in the current chain up to a target count.
     fn skip_remaining_keys(&mut self, target: u32) -> Result<(), ChatError> {
+        let identifier = current_x25519_identifier(&self.their_hybrid_public);
+
         while self.recv_seq < target {
             if self.skipped_keys.len() >= self.config.max_skip {
                 return Err(ChatError::TooManySkipped {
@@ -506,14 +499,17 @@ impl ChatSession {
             self.recv_chain = new_chain;
 
             self.skipped_keys
-                .insert((self.their_dh_public, self.recv_seq), message_key);
+                .insert((identifier, self.recv_seq), message_key);
             self.recv_seq += 1;
         }
         Ok(())
     }
 
-    /// Skip message keys up to the target sequence number and return the target's key.
-    fn skip_message_keys(&mut self, target_seq: u32, dh_public: &[u8; 32]) -> Result<[u8; 32], ChatError> {
+    fn skip_message_keys(
+        &mut self,
+        target_seq: u32,
+        identifier: &[u8; 32],
+    ) -> Result<[u8; 32], ChatError> {
         let skip_count = (target_seq - self.recv_seq) as usize;
         if skip_count > self.config.max_skip {
             return Err(ChatError::TooManySkipped {
@@ -522,17 +518,15 @@ impl ChatSession {
             });
         }
 
-        // Skip intermediate keys
         while self.recv_seq < target_seq {
             let (new_chain, message_key) = kdf_chain(&self.recv_chain);
             self.recv_chain = new_chain;
 
             self.skipped_keys
-                .insert((*dh_public, self.recv_seq), message_key);
+                .insert((*identifier, self.recv_seq), message_key);
             self.recv_seq += 1;
         }
 
-        // Now derive the target key
         let (new_chain, message_key) = kdf_chain(&self.recv_chain);
         self.recv_chain = new_chain;
         self.recv_seq += 1;
@@ -540,23 +534,9 @@ impl ChatSession {
         Ok(message_key)
     }
 
-    /// Get a skipped message key from the cache.
-    fn get_skipped_key(&mut self, dh_public: &[u8; 32], seq: u32) -> Result<[u8; 32], ChatError> {
-        self.skipped_keys
-            .remove(&(*dh_public, seq))
-            .ok_or(ChatError::SkippedKeyNotFound(seq))
-    }
-
-    /// Combine user passphrase with derived passphrase and message key.
-    ///
-    /// This produces a unique passphrase for each message by combining:
-    /// - User's provided passphrase (hashed)
-    /// - Derived passphrase from DH exchange
-    /// - Per-message key from the ratchet
     fn combine_passphrases(&self, message_key: &[u8; 32]) -> String {
         use hkdf::Hkdf;
 
-        // Combine all three inputs using HKDF
         let mut combined_input = Vec::with_capacity(96);
         combined_input.extend_from_slice(&self.user_passphrase);
         combined_input.extend_from_slice(&self.derived_passphrase);
@@ -567,11 +547,9 @@ impl ChatSession {
         hk.expand(b"ANYHIDE-CHAT-MSG-PASS", &mut output)
             .expect("32 bytes is valid");
 
-        // Convert to a passphrase string (hex encoded)
         hex::encode(output)
     }
 
-    /// Get a carrier by owner and index.
     fn get_carrier(&self, owner: u8, index: u16) -> Result<&Vec<u8>, ChatError> {
         let carriers = match (self.role, owner) {
             (Role::Initiator, 0) | (Role::Responder, 1) => &self.my_carriers,
@@ -581,39 +559,60 @@ impl ChatSession {
             }
         };
 
-        carriers.get(index as usize).ok_or(ChatError::InvalidCarrier { owner, index })
+        carriers
+            .get(index as usize)
+            .ok_or(ChatError::InvalidCarrier { owner, index })
     }
+}
+
+/// Returns the 32-byte X25519 component of a hybrid public key for use as a
+/// compact identifier (HashMap keys, skipped-key bookkeeping). The full hybrid
+/// pubkey is 1216 bytes; using just the X25519 piece keeps map keys small while
+/// preserving uniqueness — each ratchet step generates a fresh X25519 component.
+fn current_x25519_identifier(public: &HybridPublicKey) -> [u8; 32] {
+    *public.classical().as_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat::generate_carriers;
+    use crate::chat::protocol::derive_master_secret;
+    use crate::crypto::hybrid_kem;
 
-    fn create_test_keypairs() -> (StaticSecret, PublicKey, SigningKey, VerifyingKey) {
-        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let public = PublicKey::from(&secret);
+    /// Generates a hybrid keypair and an Ed25519 signing keypair for tests.
+    fn create_test_keypairs() -> (HybridSecretKey, HybridPublicKey, SigningKey, VerifyingKey) {
+        let (secret, public) = hybrid_kem::generate_keypair();
         let signing = SigningKey::generate(&mut rand::rngs::OsRng);
         let verifying = signing.verifying_key();
         (secret, public, signing, verifying)
     }
 
+    /// Builds a matched pair of `ChatSession`s with a shared master secret as
+    /// would be produced by a real handshake. Both sides use the same passphrase
+    /// for testing.
     fn create_test_sessions() -> (ChatSession, ChatSession) {
-        let (alice_eph_secret, alice_eph_public, alice_sign, alice_verify) = create_test_keypairs();
-        let (bob_eph_secret, bob_eph_public, bob_sign, bob_verify) = create_test_keypairs();
+        let (alice_secret, alice_public, alice_sign, alice_verify) = create_test_keypairs();
+        let (bob_secret, bob_public, bob_sign, bob_verify) = create_test_keypairs();
 
         let config = ChatConfig::default();
         let alice_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
         let bob_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
 
-        // Both use the same passphrase for testing
         let test_passphrase = "test_passphrase_123";
 
+        // Stand in for the two handshake KEM shared secrets — any agreed-on
+        // 32-byte values produce the same master both sides.
+        let ss_resp_to_init = [0xA1u8; 32];
+        let ss_init_to_resp = [0xB2u8; 32];
+        let master = derive_master_secret(&ss_resp_to_init, &ss_init_to_resp);
+
         let alice_session = ChatSession::init_as_initiator(
-            alice_eph_secret,
+            alice_secret,
             &alice_sign,
-            bob_eph_public,
+            bob_public.clone(),
             bob_verify,
+            &master,
             alice_carriers.clone(),
             bob_carriers.clone(),
             config.clone(),
@@ -622,10 +621,11 @@ mod tests {
         .unwrap();
 
         let bob_session = ChatSession::init_as_responder(
-            bob_eph_secret,
+            bob_secret,
             &bob_sign,
-            alice_eph_public,
+            alice_public,
             alice_verify,
+            &master,
             bob_carriers,
             alice_carriers,
             config,
@@ -650,7 +650,6 @@ mod tests {
     fn test_single_message_exchange() {
         let (mut alice, mut bob) = create_test_sessions();
 
-        // Alice sends to Bob
         let wire = alice.send_message("Hello, Bob!").unwrap();
         let received = bob.receive_message(&wire).unwrap();
 
@@ -660,30 +659,35 @@ mod tests {
     }
 
     #[test]
-    fn test_bidirectional_messages() {
+    fn test_bidirectional_messages_drive_kem_ratchet() {
         let (mut alice, mut bob) = create_test_sessions();
 
-        // Alice -> Bob
         let wire1 = alice.send_message("Hi Bob").unwrap();
+        // First message has no kem_ciphertext (no ratchet step yet).
+        // Inspect after decrypting on Bob's side via header_key by going through receive.
         let msg1 = bob.receive_message(&wire1).unwrap();
         assert_eq!(msg1, "Hi Bob");
 
-        // Bob -> Alice
+        // Bob's reply triggers a KEM ratchet.
         let wire2 = bob.send_message("Hi Alice").unwrap();
         let msg2 = alice.receive_message(&wire2).unwrap();
         assert_eq!(msg2, "Hi Alice");
 
-        // Alice -> Bob again
+        // Alice replies — another KEM ratchet step.
         let wire3 = alice.send_message("How are you?").unwrap();
         let msg3 = bob.receive_message(&wire3).unwrap();
         assert_eq!(msg3, "How are you?");
+
+        // Bob replies again.
+        let wire4 = bob.send_message("Doing well").unwrap();
+        let msg4 = alice.receive_message(&wire4).unwrap();
+        assert_eq!(msg4, "Doing well");
     }
 
     #[test]
-    fn test_multiple_consecutive_messages() {
+    fn test_multiple_consecutive_messages_no_ratchet() {
         let (mut alice, mut bob) = create_test_sessions();
 
-        // Alice sends multiple messages
         for i in 0..5 {
             let wire = alice.send_message(&format!("Message {}", i)).unwrap();
             let received = bob.receive_message(&wire).unwrap();
@@ -708,14 +712,39 @@ mod tests {
     fn test_wrong_signature_fails() {
         let (mut alice, mut bob) = create_test_sessions();
 
-        // Alice sends a message
         let mut wire = alice.send_message("Hello").unwrap();
-
-        // Tamper with the anyhide code (which contains the signature)
         wire.anyhide_code = format!("{}tampered", wire.anyhide_code);
 
-        // Bob should fail to verify
         let result = bob.receive_message(&wire);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_v1_messages_rejected() {
+        let (mut alice, mut bob) = create_test_sessions();
+
+        // Force a v1 wire message to land at Bob — must be rejected at the
+        // version check before any ratchet/decryption side-effects.
+        let mut wire = alice.send_message("Hello").unwrap();
+        wire.version = 1;
+
+        let result = bob.receive_message(&wire);
+        assert!(matches!(result, Err(ChatError::VersionMismatch { .. })));
+    }
+
+    #[test]
+    fn test_extended_back_and_forth() {
+        // Stress-test multiple ratchet reversals.
+        let (mut alice, mut bob) = create_test_sessions();
+
+        for round in 0..5 {
+            let alice_msg = format!("Alice round {}", round);
+            let wire = alice.send_message(&alice_msg).unwrap();
+            assert_eq!(bob.receive_message(&wire).unwrap(), alice_msg);
+
+            let bob_msg = format!("Bob round {}", round);
+            let wire = bob.send_message(&bob_msg).unwrap();
+            assert_eq!(alice.receive_message(&wire).unwrap(), bob_msg);
+        }
     }
 }

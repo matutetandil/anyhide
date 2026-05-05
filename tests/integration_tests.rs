@@ -1002,38 +1002,39 @@ fn test_contacts_config_crud_integration() {
 // Chat Tests (v0.11.0)
 // ============================================================================
 
-/// Test chat session establishment and message exchange
+/// Test chat session establishment and message exchange (hybrid PQ, v2)
 #[test]
 fn test_chat_session_message_exchange() {
+    use anyhide::chat::protocol::derive_master_secret;
     use anyhide::chat::{generate_carriers, ChatConfig, ChatSession};
+    use anyhide::crypto::hybrid_kem;
     use ed25519_dalek::SigningKey;
-    use x25519_dalek::{PublicKey, StaticSecret};
 
-    // Generate keypairs for Alice (initiator) and Bob (responder)
-    let alice_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let alice_eph_public = PublicKey::from(&alice_eph_secret);
+    // Generate hybrid keypairs for Alice (initiator) and Bob (responder).
+    let (alice_eph_secret, alice_eph_public) = hybrid_kem::generate_keypair();
     let alice_signing = SigningKey::generate(&mut rand::rngs::OsRng);
     let alice_verifying = alice_signing.verifying_key();
 
-    let bob_eph_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let bob_eph_public = PublicKey::from(&bob_eph_secret);
+    let (bob_eph_secret, bob_eph_public) = hybrid_kem::generate_keypair();
     let bob_signing = SigningKey::generate(&mut rand::rngs::OsRng);
     let bob_verifying = bob_signing.verifying_key();
 
-    // Generate carriers
     let config = ChatConfig::default();
     let alice_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
     let bob_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
 
-    // Shared passphrase for the chat session
     let passphrase = "test_chat_passphrase";
 
-    // Initialize sessions
+    // Stand-in master secret derived from two arbitrary 32-byte values; in
+    // production both come from the actual handshake KEM exchange.
+    let master = derive_master_secret(&[0xAAu8; 32], &[0xBBu8; 32]);
+
     let mut alice = ChatSession::init_as_initiator(
         alice_eph_secret,
         &alice_signing,
         bob_eph_public,
         bob_verifying,
+        &master,
         alice_carriers.clone(),
         bob_carriers.clone(),
         config.clone(),
@@ -1046,6 +1047,7 @@ fn test_chat_session_message_exchange() {
         &bob_signing,
         alice_eph_public,
         alice_verifying,
+        &master,
         bob_carriers,
         alice_carriers,
         config,
@@ -1077,20 +1079,18 @@ fn test_chat_session_message_exchange() {
     // The important thing is that messages are exchanged correctly.
 }
 
-/// Test chat forward secrecy through DH ratchet
+/// Test chat forward secrecy through KEM ratchet (hybrid PQ, v2)
 #[test]
 fn test_chat_forward_secrecy() {
+    use anyhide::chat::protocol::derive_master_secret;
     use anyhide::chat::{generate_carriers, ChatConfig, ChatSession};
+    use anyhide::crypto::hybrid_kem;
     use ed25519_dalek::SigningKey;
-    use x25519_dalek::{PublicKey, StaticSecret};
 
-    // Setup
-    let alice_eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let alice_pub = PublicKey::from(&alice_eph);
+    let (alice_eph, alice_pub) = hybrid_kem::generate_keypair();
     let alice_sign = SigningKey::generate(&mut rand::rngs::OsRng);
 
-    let bob_eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    let bob_pub = PublicKey::from(&bob_eph);
+    let (bob_eph, bob_pub) = hybrid_kem::generate_keypair();
     let bob_sign = SigningKey::generate(&mut rand::rngs::OsRng);
 
     let config = ChatConfig::default();
@@ -1098,14 +1098,16 @@ fn test_chat_forward_secrecy() {
     let bob_carriers = generate_carriers(config.carriers_per_party, config.carrier_size);
     let passphrase = "test_forward_secrecy";
 
+    let master = derive_master_secret(&[0xCCu8; 32], &[0xDDu8; 32]);
+
     let mut alice = ChatSession::init_as_initiator(
         alice_eph, &alice_sign, bob_pub, bob_sign.verifying_key(),
-        alice_carriers.clone(), bob_carriers.clone(), config.clone(), passphrase,
+        &master, alice_carriers.clone(), bob_carriers.clone(), config.clone(), passphrase,
     ).unwrap();
 
     let mut bob = ChatSession::init_as_responder(
         bob_eph, &bob_sign, alice_pub, alice_sign.verifying_key(),
-        bob_carriers, alice_carriers, config, passphrase,
+        &master, bob_carriers, alice_carriers, config, passphrase,
     ).unwrap();
 
     // Exchange 10 messages in alternating directions
