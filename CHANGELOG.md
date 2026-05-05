@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.14.0] - 2026-05-05
 
-- **Hybrid Post-Quantum KEM primitive** (`crypto/hybrid_kem.rs`)
+### Highlights
+
+This release adds an opt-in **post-quantum hybrid encryption** track (X25519 + ML-KEM-768) covering encoder, decoder, multi-recipient, and chat layers. Existing classical (v6) anyhide codes remain byte-identical and fully readable. The chat protocol forced a hard break to v2 — it is RAM-only with no persisted state, so the migration boundary is clean. Users who haven't migrated keep using classical keys; users who run `keygen --hybrid` get post-quantum confidentiality with no other workflow changes (encode / decode auto-detect the wire format from PEM headers).
+
+### Added
   - Combines classical X25519 ECDH with ML-KEM-768 (FIPS 203, formerly Kyber-768)
   - Single-call API: `generate_keypair()`, `encapsulate()`, `decapsulate()`
   - HKDF-SHA256 combiner with `ANYHIDE-HYBRID-KEM-V1` info string mixes both shared secrets — security holds as long as either primitive remains secure
