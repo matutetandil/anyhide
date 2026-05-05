@@ -125,6 +125,46 @@ pub fn encrypt_with_passphrase(
     Ok(result)
 }
 
+/// Wire-format magic prefix that identifies a hybrid post-quantum anyhide code.
+///
+/// Legacy classical codes (v6) begin with a 32-byte X25519 ephemeral public key,
+/// which is uniformly random — collision probability for a 4-byte magic is 1/2^32.
+/// New hybrid codes begin with this magic followed by a one-byte version field.
+pub const HYBRID_WIRE_MAGIC: [u8; 4] = *b"AHV7";
+
+/// Hybrid wire format version. Allows future evolution of the post-quantum scheme
+/// without breaking already-emitted v7 codes.
+pub const HYBRID_WIRE_VERSION: u8 = 1;
+
+/// Length of the hybrid wire prefix (magic + version byte).
+pub const HYBRID_WIRE_PREFIX_LEN: usize = HYBRID_WIRE_MAGIC.len() + 1;
+
+/// Wire format detected on a serialized anyhide code (post-base64-decode bytes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireFormat {
+    /// Legacy classical X25519 format. No magic prefix; the first 32 bytes are the
+    /// sender's ephemeral X25519 public key. Decoded with `decrypt_with_passphrase`.
+    ClassicalV6,
+    /// Hybrid post-quantum format (X25519 + ML-KEM-768). Begins with `HYBRID_WIRE_MAGIC`
+    /// followed by `HYBRID_WIRE_VERSION`. Decoded with `decrypt_with_passphrase_hybrid`.
+    HybridV7,
+}
+
+/// Detects the wire format of a serialized anyhide code by sniffing the magic prefix.
+///
+/// Inputs shorter than the magic prefix or without the magic bytes are treated as
+/// legacy classical codes; the legacy decoder will reject them at a deeper layer if
+/// they are malformed.
+pub fn detect_wire_format(ciphertext: &[u8]) -> WireFormat {
+    if ciphertext.len() >= HYBRID_WIRE_PREFIX_LEN
+        && ciphertext[..HYBRID_WIRE_MAGIC.len()] == HYBRID_WIRE_MAGIC
+    {
+        WireFormat::HybridV7
+    } else {
+        WireFormat::ClassicalV6
+    }
+}
+
 /// Decrypts data using hybrid decryption with decompression:
 /// 1. Extract ephemeral public key from ciphertext
 /// 2. Decrypt with private key using ephemeral public key
@@ -156,6 +196,76 @@ pub fn decrypt_with_passphrase(
     let compressed = decrypt_symmetric(&asymmetric_decrypted, passphrase)?;
 
     // Step 4: Decompress
+    let plaintext = decompress(&compressed)?;
+
+    Ok(plaintext)
+}
+
+/// Encrypts data using post-quantum hybrid encryption with compression:
+/// 1. Compress the plaintext (DEFLATE)
+/// 2. Encrypt with passphrase (symmetric)
+/// 3. Encapsulate against the recipient's hybrid (X25519 + ML-KEM-768) public key
+///    and AEAD-encrypt the symmetric ciphertext
+/// 4. Prepend the hybrid wire prefix (`HYBRID_WIRE_MAGIC` + `HYBRID_WIRE_VERSION`)
+///    so the decoder can dispatch on format without first decrypting
+///
+/// The output begins with `HYBRID_WIRE_MAGIC || HYBRID_WIRE_VERSION` followed by
+/// the bytes returned by `encrypt_hybrid_to_bytes`. Forward secrecy at the wire
+/// layer is not provided here — encoder ratchet mode (separate ephemeral keypairs
+/// per message) is the mechanism for that property.
+pub fn encrypt_with_passphrase_hybrid(
+    plaintext: &[u8],
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+) -> Result<Vec<u8>, EncryptionError> {
+    let compressed = compress(plaintext)?;
+    let symmetric_encrypted = encrypt_symmetric(&compressed, passphrase)?;
+    let asymmetric_encrypted = encrypt_hybrid_to_bytes(&symmetric_encrypted, public_key)?;
+
+    let mut result = Vec::with_capacity(HYBRID_WIRE_PREFIX_LEN + asymmetric_encrypted.len());
+    result.extend_from_slice(&HYBRID_WIRE_MAGIC);
+    result.push(HYBRID_WIRE_VERSION);
+    result.extend(asymmetric_encrypted);
+
+    Ok(result)
+}
+
+/// Decrypts a hybrid-format anyhide code (v7) using a hybrid secret key:
+/// 1. Validate the wire prefix (`HYBRID_WIRE_MAGIC` + supported version byte)
+/// 2. Decapsulate the hybrid KEM ciphertext with the recipient's hybrid secret
+///    and AEAD-decrypt the inner payload
+/// 3. Decrypt with passphrase (symmetric)
+/// 4. Decompress
+///
+/// Returns an error if the input is not in the hybrid wire format or carries an
+/// unsupported version. Use `detect_wire_format` to dispatch between this function
+/// and the classical `decrypt_with_passphrase` before calling.
+pub fn decrypt_with_passphrase_hybrid(
+    ciphertext: &[u8],
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+) -> Result<Vec<u8>, EncryptionError> {
+    if ciphertext.len() < HYBRID_WIRE_PREFIX_LEN
+        || ciphertext[..HYBRID_WIRE_MAGIC.len()] != HYBRID_WIRE_MAGIC
+    {
+        return Err(EncryptionError::AsymmetricError(
+            AsymmetricError::CiphertextTooShort,
+        ));
+    }
+
+    let version = ciphertext[HYBRID_WIRE_MAGIC.len()];
+    if version != HYBRID_WIRE_VERSION {
+        return Err(EncryptionError::AsymmetricError(
+            AsymmetricError::DecryptionFailed(format!(
+                "Unsupported hybrid wire format version: {version} (this build supports v{HYBRID_WIRE_VERSION})"
+            )),
+        ));
+    }
+
+    let payload = &ciphertext[HYBRID_WIRE_PREFIX_LEN..];
+
+    let symmetric_encrypted = decrypt_hybrid_from_bytes(payload, secret_key)?;
+    let compressed = decrypt_symmetric(&symmetric_encrypted, passphrase)?;
     let plaintext = decompress(&compressed)?;
 
     Ok(plaintext)
@@ -285,6 +395,108 @@ mod tests {
 
         let encrypted = encrypt_with_passphrase(plaintext, passphrase, keypair1.public_key()).unwrap();
         let result = decrypt_with_passphrase(&encrypted, passphrase, keypair2.secret_key());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hybrid_passphrase_encryption_roundtrip() {
+        let plaintext = b"Post-quantum secret message";
+        let passphrase = "shared-passphrase";
+
+        let keypair = HybridKeyPair::generate();
+
+        let encrypted =
+            encrypt_with_passphrase_hybrid(plaintext, passphrase, keypair.public_key()).unwrap();
+        let decrypted =
+            decrypt_with_passphrase_hybrid(&encrypted, passphrase, keypair.secret_key()).unwrap();
+
+        assert_eq!(plaintext.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn hybrid_wire_prefix_is_emitted() {
+        let plaintext = b"prefix sniff";
+        let passphrase = "p";
+        let keypair = HybridKeyPair::generate();
+
+        let encrypted =
+            encrypt_with_passphrase_hybrid(plaintext, passphrase, keypair.public_key()).unwrap();
+
+        assert!(encrypted.len() > HYBRID_WIRE_PREFIX_LEN);
+        assert_eq!(&encrypted[..HYBRID_WIRE_MAGIC.len()], &HYBRID_WIRE_MAGIC);
+        assert_eq!(encrypted[HYBRID_WIRE_MAGIC.len()], HYBRID_WIRE_VERSION);
+    }
+
+    #[test]
+    fn detect_wire_format_distinguishes_v6_and_v7() {
+        let passphrase = "p";
+
+        let classical = KeyPair::generate();
+        let v6 = encrypt_with_passphrase(b"classical", passphrase, classical.public_key()).unwrap();
+        assert_eq!(detect_wire_format(&v6), WireFormat::ClassicalV6);
+
+        let hybrid = HybridKeyPair::generate();
+        let v7 = encrypt_with_passphrase_hybrid(b"hybrid", passphrase, hybrid.public_key()).unwrap();
+        assert_eq!(detect_wire_format(&v7), WireFormat::HybridV7);
+    }
+
+    #[test]
+    fn detect_wire_format_falls_back_to_classical_on_short_input() {
+        // An empty buffer has no magic; fall back to classical so the legacy
+        // decoder can produce its own length error.
+        assert_eq!(detect_wire_format(&[]), WireFormat::ClassicalV6);
+        assert_eq!(detect_wire_format(&[0xAB, 0xCD]), WireFormat::ClassicalV6);
+    }
+
+    #[test]
+    fn hybrid_decrypt_rejects_classical_input() {
+        let keypair = HybridKeyPair::generate();
+        let classical = KeyPair::generate();
+        let v6 = encrypt_with_passphrase(b"x", "p", classical.public_key()).unwrap();
+
+        let result = decrypt_with_passphrase_hybrid(&v6, "p", keypair.secret_key());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hybrid_decrypt_rejects_unsupported_version() {
+        let keypair = HybridKeyPair::generate();
+
+        let mut tampered =
+            encrypt_with_passphrase_hybrid(b"x", "p", keypair.public_key()).unwrap();
+        // Bump the version byte to a value this build does not recognise.
+        tampered[HYBRID_WIRE_MAGIC.len()] = HYBRID_WIRE_VERSION.wrapping_add(1);
+
+        let result = decrypt_with_passphrase_hybrid(&tampered, "p", keypair.secret_key());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hybrid_decrypt_with_wrong_secret_fails() {
+        let plaintext = b"x";
+        let passphrase = "p";
+
+        let keypair1 = HybridKeyPair::generate();
+        let keypair2 = HybridKeyPair::generate();
+
+        let encrypted =
+            encrypt_with_passphrase_hybrid(plaintext, passphrase, keypair1.public_key()).unwrap();
+        let result = decrypt_with_passphrase_hybrid(&encrypted, passphrase, keypair2.secret_key());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hybrid_decrypt_with_wrong_passphrase_fails() {
+        let plaintext = b"x";
+        let keypair = HybridKeyPair::generate();
+
+        let encrypted =
+            encrypt_with_passphrase_hybrid(plaintext, "correct", keypair.public_key()).unwrap();
+        let result = decrypt_with_passphrase_hybrid(&encrypted, "wrong", keypair.secret_key());
 
         assert!(result.is_err());
     }

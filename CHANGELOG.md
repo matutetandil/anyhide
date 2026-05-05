@@ -117,6 +117,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The function emits a stderr note recommending `--from-qr` whenever it succeeds — typing 2432 hex chars on a CLI is impractical, QR is the path
   - `parse_ephemeral_from_qr` (preferred path) decodes hybrid pubkey directly from QR bytes — no UX change for users on this path
 
+- **Hybrid wire format dispatcher (cripto layer)** (`crypto/mod.rs`)
+  - New constants: `HYBRID_WIRE_MAGIC = b"AHV7"` (4 bytes), `HYBRID_WIRE_VERSION = 1`, `HYBRID_WIRE_PREFIX_LEN = 5`
+  - Hybrid (v7) anyhide codes carry a 5-byte magic+version prefix; classical (v6) codes have no prefix and start directly with a 32-byte X25519 ephemeral pubkey. Magic chosen to make collision with the random first bytes of a v6 code statistically negligible (~1/2^32)
+  - `WireFormat` enum (`ClassicalV6`, `HybridV7`) plus `detect_wire_format(ciphertext)` for sniffing the wire format without first decrypting
+  - `encrypt_with_passphrase_hybrid(plaintext, passphrase, &HybridPublicKey) -> Vec<u8>` produces v7 codes by composing compress → symmetric encrypt → hybrid asymmetric encrypt → magic prefix
+  - `decrypt_with_passphrase_hybrid(ciphertext, passphrase, &HybridSecretKey) -> Vec<u8>` consumes v7 codes; rejects classical inputs and unsupported version bytes explicitly
+  - Hybrid keys cannot decrypt v6 codes by design — a hybrid keypair is a fresh identity, not a superset of the user's classical keypair. Users migrating to PQ keep their classical private key on hand to read pre-migration codes
+  - Existing `encrypt_with_passphrase` / `decrypt_with_passphrase` (classical X25519) untouched — backward compatibility for v6 codes is preserved at the byte level
+  - 8 unit tests: round-trip, magic prefix emission, format detection (v6 vs v7), short-input fallback, classical input rejection, unsupported-version rejection, wrong-secret rejection, wrong-passphrase rejection
+
 - **`keygen --hybrid` flag** (`commands/keygen.rs`)
   - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
   - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake
