@@ -67,7 +67,8 @@ pub use signing::{
 };
 pub use symmetric::{decrypt_symmetric, encrypt_symmetric, SymmetricError};
 pub use mnemonic::{
-    key_to_mnemonic, mnemonic_to_key, validate_mnemonic, format_mnemonic, MnemonicError,
+    format_mnemonic, hybrid_key_to_mnemonics, key_to_mnemonic, mnemonic_to_key,
+    mnemonics_to_hybrid_key, validate_mnemonic, MnemonicError,
 };
 
 use thiserror::Error;

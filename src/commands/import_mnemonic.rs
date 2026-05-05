@@ -1,46 +1,59 @@
 //! Import mnemonic command - restore a key from 24 BIP39 words.
 
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 
-use anyhide::crypto::{mnemonic_to_key, KeyPair, SigningKeyPair};
+use anyhide::crypto::{
+    encode_hybrid_public_key_pem, encode_hybrid_secret_key_pem, mnemonic_to_key,
+    mnemonics_to_hybrid_key, HybridSecretKey, KeyPair, KeyType, SigningKeyPair,
+};
 
 use super::CommandExecutor;
 
 /// Key type for import.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum ImportKeyType {
-    /// Encryption key (X25519)
+    /// Encryption key (classical X25519, 24 words)
     #[default]
     Encryption,
-    /// Signing key (Ed25519)
+    /// Signing key (Ed25519, 24 words)
     Signing,
+    /// Hybrid post-quantum encryption key (X25519 + ML-KEM-768, three 24-word phrases)
+    Hybrid,
 }
 
 /// Restore a private key from a 24-word mnemonic phrase.
 ///
 /// The mnemonic must have been created with `export-mnemonic` or `keygen --show-mnemonic`.
 /// Enter the 24 words when prompted (space-separated or one per line).
+///
+/// For `--key-type hybrid`, three 24-word phrases are required (X25519, ML-KEM-d, ML-KEM-z).
 #[derive(Args, Debug)]
 pub struct ImportMnemonicCommand {
     /// Output path for the restored key (without extension)
-    /// Creates .pub + .key (encryption) or .sign.pub + .sign.key (signing)
+    /// Creates .pub + .key (encryption / hybrid) or .sign.pub + .sign.key (signing)
     #[arg(short, long, default_value = "restored")]
     pub output: PathBuf,
 
-    /// Key type to import: encryption (default) or signing
+    /// Key type to import: encryption (classical), hybrid (post-quantum), or signing
     #[arg(long, default_value = "encryption")]
     pub key_type: ImportKeyType,
 }
 
 impl CommandExecutor for ImportMnemonicCommand {
     fn execute(&self) -> Result<()> {
+        if matches!(self.key_type, ImportKeyType::Hybrid) {
+            return self.execute_hybrid();
+        }
+
         let key_type_name = match self.key_type {
             ImportKeyType::Encryption => "Encryption",
             ImportKeyType::Signing => "Signing",
+            ImportKeyType::Hybrid => unreachable!(),
         };
 
         println!("Import {} Key from Mnemonic", key_type_name);
@@ -102,11 +115,93 @@ impl CommandExecutor for ImportMnemonicCommand {
                 println!("  Public key:  {}", sign_pub_path.display());
                 println!("  Private key: {}", sign_key_path.display());
             }
+            ImportKeyType::Hybrid => unreachable!(),
         }
 
         println!();
         println!("IMPORTANT: Verify the key fingerprint matches your backup!");
         println!("Run: anyhide fingerprint <key-file>");
+
+        Ok(())
+    }
+}
+
+impl ImportMnemonicCommand {
+    /// Restore a hybrid PQ encryption keypair from three 24-word phrases.
+    ///
+    /// The phrases are concatenated into the 96-byte hybrid secret per the
+    /// `HybridSecretKey::to_bytes` layout, then a fresh `HybridKeyPair`-style
+    /// PEM pair is written. We bypass `HybridKeyPair::save_to_files` because
+    /// `HybridKeyPair` has no public constructor from raw bytes; the encoder
+    /// helpers (`encode_hybrid_*_pem`) work directly off `HybridSecretKey`
+    /// and `HybridPublicKey`, both of which we can rebuild deterministically.
+    fn execute_hybrid(&self) -> Result<()> {
+        println!("Import Hybrid PQ Encryption Key from Mnemonic");
+        println!("=============================================");
+        println!();
+        println!("The hybrid encryption secret is 96 bytes split across THREE 24-word phrases:");
+        println!("  Phrase 1/3: X25519 component (32 bytes)");
+        println!("  Phrase 2/3: ML-KEM seed d (32 bytes)");
+        println!("  Phrase 3/3: ML-KEM seed z (32 bytes)");
+        println!();
+        println!("All three phrases are required, in the order shown by `export-mnemonic`.");
+        println!();
+
+        let labels = ["1/3 (X25519)", "2/3 (ML-KEM seed d)", "3/3 (ML-KEM seed z)"];
+        let mut phrases: Vec<Vec<String>> = Vec::with_capacity(3);
+
+        for label in &labels {
+            println!("Enter phrase {} — 24 words (space-separated, or press Enter for one-by-one):", label);
+            print!("> ");
+            io::stdout().flush()?;
+            let words = read_mnemonic_interactive()?;
+            phrases.push(words);
+            println!();
+        }
+
+        println!("Validating mnemonics...");
+        let phrases_arr: [Vec<String>; 3] = [
+            phrases.remove(0),
+            phrases.remove(0),
+            phrases.remove(0),
+        ];
+        let secret_bytes = mnemonics_to_hybrid_key(&phrases_arr).context(
+            "Invalid mnemonics. Check for typos and ensure each phrase is in the correct order.",
+        )?;
+        println!("All three checksums valid!");
+        println!();
+
+        let secret = HybridSecretKey::from_bytes(&secret_bytes)
+            .context("Failed to reconstruct hybrid secret key from mnemonic bytes")?;
+        let public = secret.public_key();
+
+        let pub_pem = encode_hybrid_public_key_pem(&public, KeyType::HybridV1)
+            .context("Failed to encode hybrid public key as PEM")?;
+        let key_pem = encode_hybrid_secret_key_pem(&secret, KeyType::HybridV1)
+            .context("Failed to encode hybrid private key as PEM")?;
+
+        let pub_path = self.output.with_extension("pub");
+        let key_path = self.output.with_extension("key");
+
+        fs::write(&pub_path, pub_pem)
+            .with_context(|| format!("Failed to write hybrid public key to {}", pub_path.display()))?;
+        fs::write(&key_path, key_pem)
+            .with_context(|| format!("Failed to write hybrid private key to {}", key_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&key_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&key_path, perms)?;
+        }
+
+        println!("Hybrid PQ encryption keys restored successfully:");
+        println!("  Public key:  {}", pub_path.display());
+        println!("  Private key: {}", key_path.display());
+        println!();
+        println!("IMPORTANT: Verify the key fingerprint matches your backup!");
+        println!("Run: anyhide fingerprint {}", pub_path.display());
 
         Ok(())
     }

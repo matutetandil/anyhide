@@ -88,7 +88,8 @@ pub use crypto::{KeyPair, KeyType, SigningKeyPair};
 
 // Re-export mnemonic backup functions
 pub use crypto::{
-    key_to_mnemonic, mnemonic_to_key, validate_mnemonic, format_mnemonic, MnemonicError,
+    format_mnemonic, hybrid_key_to_mnemonics, key_to_mnemonic, mnemonic_to_key,
+    mnemonics_to_hybrid_key, validate_mnemonic, MnemonicError,
 };
 
 // Re-export ephemeral key functions for forward secrecy ratchet

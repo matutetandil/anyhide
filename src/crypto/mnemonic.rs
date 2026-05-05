@@ -131,6 +131,54 @@ pub fn validate_mnemonic(words: &[String]) -> Result<(), MnemonicError> {
     Ok(())
 }
 
+/// Splits a 96-byte hybrid secret into three 24-word BIP39 phrases.
+///
+/// The hybrid secret layout (per `HybridSecretKey::to_bytes`) is
+/// `classical X25519 (32) || ML-KEM seed d (32) || ML-KEM seed z (32)`.
+/// Each 32-byte component is independently random, so each round-trips
+/// through the standard 24-word BIP39 encoding without inventing a new
+/// scheme. The returned slice is ordered:
+///
+/// - `[0]`: X25519 secret
+/// - `[1]`: ML-KEM-768 seed `d`
+/// - `[2]`: ML-KEM-768 seed `z`
+///
+/// Pair with `mnemonics_to_hybrid_key` to round-trip back to the 96-byte
+/// `HybridSecretKey` representation.
+pub fn hybrid_key_to_mnemonics(secret_bytes: &[u8; 96]) -> [Vec<String>; 3] {
+    let mut classical = [0u8; 32];
+    classical.copy_from_slice(&secret_bytes[0..32]);
+    let mut pq_d = [0u8; 32];
+    pq_d.copy_from_slice(&secret_bytes[32..64]);
+    let mut pq_z = [0u8; 32];
+    pq_z.copy_from_slice(&secret_bytes[64..96]);
+
+    [
+        key_to_mnemonic(&classical),
+        key_to_mnemonic(&pq_d),
+        key_to_mnemonic(&pq_z),
+    ]
+}
+
+/// Reconstructs the 96-byte hybrid secret from three 24-word BIP39 phrases.
+///
+/// Each phrase is validated independently (length, wordlist membership,
+/// checksum) — a typo in any one phrase fails fast with the matching
+/// `MnemonicError` rather than producing a silently-corrupted hybrid key.
+pub fn mnemonics_to_hybrid_key(
+    phrases: &[Vec<String>; 3],
+) -> Result<[u8; 96], MnemonicError> {
+    let classical = mnemonic_to_key(&phrases[0])?;
+    let pq_d = mnemonic_to_key(&phrases[1])?;
+    let pq_z = mnemonic_to_key(&phrases[2])?;
+
+    let mut out = [0u8; 96];
+    out[0..32].copy_from_slice(&classical);
+    out[32..64].copy_from_slice(&pq_d);
+    out[64..96].copy_from_slice(&pq_z);
+    Ok(out)
+}
+
 /// Format a mnemonic for display (4 words per line, numbered).
 pub fn format_mnemonic(words: &[String]) -> String {
     let mut lines = Vec::new();
@@ -286,5 +334,53 @@ mod tests {
 
         // First word should be "zoo" (index 2047 = 0b11111111111)
         assert_eq!(words[0], "zoo");
+    }
+
+    #[test]
+    fn hybrid_mnemonics_roundtrip() {
+        let mut secret = [0u8; 96];
+        for (i, b) in secret.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(11);
+        }
+
+        let phrases = hybrid_key_to_mnemonics(&secret);
+        assert_eq!(phrases[0].len(), 24);
+        assert_eq!(phrases[1].len(), 24);
+        assert_eq!(phrases[2].len(), 24);
+
+        let recovered = mnemonics_to_hybrid_key(&phrases).expect("roundtrip");
+        assert_eq!(recovered, secret);
+    }
+
+    #[test]
+    fn hybrid_mnemonics_separate_components_round_trip_independently() {
+        // Each 32-byte chunk encodes / decodes through the standard
+        // single-phrase API too, since the hybrid scheme is just three
+        // independent BIP39 phrases concatenated.
+        let secret = [0xAB; 96];
+        let phrases = hybrid_key_to_mnemonics(&secret);
+
+        let chunk0 = mnemonic_to_key(&phrases[0]).unwrap();
+        let chunk1 = mnemonic_to_key(&phrases[1]).unwrap();
+        let chunk2 = mnemonic_to_key(&phrases[2]).unwrap();
+
+        assert_eq!(chunk0, [0xAB; 32]);
+        assert_eq!(chunk1, [0xAB; 32]);
+        assert_eq!(chunk2, [0xAB; 32]);
+    }
+
+    #[test]
+    fn hybrid_mnemonics_reject_corruption_in_any_phrase() {
+        let secret = [0x42; 96];
+        let mut phrases = hybrid_key_to_mnemonics(&secret);
+
+        // Corrupt the second phrase only — the third must still pass on its
+        // own, but the aggregate fails fast on the broken phrase.
+        phrases[1][0] = "notavalidword".to_string();
+
+        assert!(matches!(
+            mnemonics_to_hybrid_key(&phrases),
+            Err(MnemonicError::InvalidWord(_))
+        ));
     }
 }

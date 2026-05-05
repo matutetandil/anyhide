@@ -153,7 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
   - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake
   - Combines with `--ephemeral` for a hybrid ephemeral keypair, written either as individual files (default) or to a v2 consolidated store (see below)
-  - `--show-mnemonic` is silently skipped for hybrid keys (BIP39 backup is built around 32-byte secrets; the 96-byte hybrid secret needs a different scheme — deferred to a future release)
+  - `--show-mnemonic` works with `--hybrid`: the 96-byte hybrid secret is split into three 24-word BIP39 phrases (X25519, ML-KEM seed `d`, ML-KEM seed `z`)
+
+- **BIP39 mnemonic backup for hybrid PQ keys** (`crypto/mnemonic.rs`, `commands/{keygen,export_mnemonic,import_mnemonic}.rs`)
+  - New library helpers `hybrid_key_to_mnemonics(&[u8; 96]) -> [Vec<String>; 3]` and `mnemonics_to_hybrid_key(&[Vec<String>; 3]) -> Result<[u8; 96]>` split / reassemble the 96-byte hybrid secret across three independent 24-word BIP39 phrases. Each phrase carries its own 8-bit SHA-256 checksum, validated independently — a typo in one phrase fails fast with `MnemonicError` rather than corrupting the recovered key
+  - `keygen --hybrid --show-mnemonic` prints all three phrases labeled "1/3 (X25519 component)", "2/3 (ML-KEM seed d)", "3/3 (ML-KEM seed z)" plus the Ed25519 signing phrase. Replaces the previous "not yet supported" warning
+  - `export-mnemonic` detects `BEGIN ANYHIDE HYBRID PRIVATE KEY` PEMs and dispatches to the hybrid printer, emitting all three labeled phrases. Classical and signing PEMs continue to use the single-phrase path
+  - `import-mnemonic --key-type hybrid` prompts the user for the three phrases in order, validates each independently, reconstructs the `HybridSecretKey` via `from_bytes`, derives the matching `HybridPublicKey`, and writes the resulting `HYBRID PRIVATE / PUBLIC KEY` PEM pair (with `chmod 600` on the secret file on Unix). Bypasses `HybridKeyPair::save_to_files` because the type has no public from-bytes constructor; the encoder helpers work directly off the secret / public keys
+  - 3 new `crypto::mnemonic` unit tests covering 96-byte round-trip, independent component round-trip through the single-phrase API, and per-phrase corruption detection
 
 - **Hybrid PQ consolidated ephemeral storage via the `keygen` CLI** (`commands/keygen.rs`)
   - `--hybrid --ephemeral --eph-keys <path> --eph-pubs <path> --contact <name>` now wires through to `save_private_key_for_contact_hybrid` / `save_public_key_for_contact_hybrid` (separate v2 stores)

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
-use anyhide::crypto::{format_mnemonic, key_to_mnemonic};
+use anyhide::crypto::{format_mnemonic, hybrid_key_to_mnemonics, key_to_mnemonic};
 
 use super::CommandExecutor;
 
@@ -38,6 +38,13 @@ impl CommandExecutor for ExportMnemonicCommand {
             );
         }
 
+        // Hybrid PQ keys carry a 96-byte secret split across three 24-word
+        // phrases. Detect them up front and dispatch to the hybrid printer
+        // before falling back to the classical 32-byte path.
+        if content.contains("ANYHIDE HYBRID PRIVATE KEY") {
+            return self.export_hybrid(&content);
+        }
+
         // Detect key type from PEM header
         let key_type = if content.contains("ANYHIDE PRIVATE KEY") {
             "Encryption"
@@ -45,8 +52,8 @@ impl CommandExecutor for ExportMnemonicCommand {
             "Signing"
         } else {
             bail!(
-                "Unknown key format. Expected ANYHIDE PRIVATE KEY or ANYHIDE SIGNING PRIVATE KEY.\n\
-                 Make sure you're using a private key file (.key or .sign.key)."
+                "Unknown key format. Expected ANYHIDE PRIVATE KEY, ANYHIDE HYBRID PRIVATE KEY,\n\
+                 or ANYHIDE SIGNING PRIVATE KEY. Make sure you're using a private key file."
             );
         };
 
@@ -76,6 +83,87 @@ impl CommandExecutor for ExportMnemonicCommand {
 
         Ok(())
     }
+}
+
+impl ExportMnemonicCommand {
+    /// Export a hybrid PQ private key as three 24-word phrases.
+    ///
+    /// The hybrid secret has the layout
+    /// `classical X25519 (32) || ML-KEM seed d (32) || ML-KEM seed z (32)`,
+    /// so each component is encoded as an independent BIP39 phrase.
+    fn export_hybrid(&self, pem_content: &str) -> Result<()> {
+        let bytes = extract_pem_body(pem_content)?;
+
+        if bytes.len() != 96 {
+            bail!(
+                "Invalid hybrid private key length: expected 96 bytes, got {}.\n\
+                 Make sure the file is a valid ANYHIDE HYBRID PRIVATE KEY PEM.",
+                bytes.len()
+            );
+        }
+
+        let mut secret = [0u8; 96];
+        secret.copy_from_slice(&bytes);
+        let phrases = hybrid_key_to_mnemonics(&secret);
+
+        println!("Hybrid PQ Encryption Key Mnemonic Backup");
+        println!("========================================");
+        println!();
+        println!("Key file: {}", self.key_path.display());
+        println!();
+        println!("The hybrid encryption secret is 96 bytes and is split into THREE");
+        println!("24-word phrases. All three are required to restore the key, in order.");
+        println!();
+
+        let labels = [
+            "Phrase 1/3 (X25519 component)",
+            "Phrase 2/3 (ML-KEM seed d)",
+            "Phrase 3/3 (ML-KEM seed z)",
+        ];
+
+        for (label, phrase) in labels.iter().zip(phrases.iter()) {
+            println!("{}", label);
+            println!("------------------------");
+            println!("{}", format_mnemonic(phrase));
+            println!();
+        }
+
+        println!("IMPORTANT:");
+        println!("  - Store all three phrases in a safe place (paper, not digital)");
+        println!("  - Anyone with these words can restore your private key");
+        println!("  - The word ORDER matters within each phrase, AND the phrase order");
+        println!("    matters across them — keep them clearly labeled 1/3, 2/3, 3/3");
+        println!();
+        println!("To restore: anyhide import-mnemonic -o <output> --key-type hybrid");
+
+        Ok(())
+    }
+}
+
+/// Extracts the raw bytes from a PEM body without enforcing a specific length.
+fn extract_pem_body(pem_content: &str) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let lines: Vec<&str> = pem_content.lines().collect();
+
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("-----BEGIN"))
+        .context("Missing PEM header")?;
+
+    let end = lines
+        .iter()
+        .position(|l| l.starts_with("-----END"))
+        .context("Missing PEM footer")?;
+
+    let base64_content: String = lines[start + 1..end]
+        .iter()
+        .map(|l| l.trim())
+        .collect();
+
+    STANDARD
+        .decode(&base64_content)
+        .context("Invalid base64 in key file")
 }
 
 /// Extract 32-byte key from PEM content.

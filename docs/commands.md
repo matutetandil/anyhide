@@ -11,7 +11,7 @@ Options:
   -o, --output <PATH>      Output path for keys (default: anyhide)
   --hybrid                 Generate post-quantum hybrid keys (X25519 + ML-KEM-768)
   --ephemeral              Generate ephemeral keys for forward secrecy
-  --show-mnemonic          Show 24-word backup phrases (classical long-term keys only)
+  --show-mnemonic          Show BIP39 backup phrases (long-term keys only — 24 words classical, 3x24 words hybrid)
   --contact <NAME>         Contact name (required for consolidated storage)
   --eph-keys <PATH>        Path to .eph.key file (consolidated private keys)
   --eph-pubs <PATH>        Path to .eph.pub file (consolidated public keys)
@@ -28,11 +28,15 @@ anyhide keygen --hybrid -o mykeys
 # Creates: mykeys.pub, mykeys.key (with HYBRID PEM headers), plus the
 # Ed25519 mykeys.sign.pub / mykeys.sign.key signing pair.
 
-# Long-term keys with mnemonic backup phrases (classical only)
+# Long-term keys with mnemonic backup phrases (classical)
 anyhide keygen -o mykeys --show-mnemonic
 # Shows 24-word phrases for both encryption and signing keys.
-# Note: --show-mnemonic is silently skipped when combined with --hybrid;
-# BIP39 backup for the 96-byte hybrid secret is a follow-up.
+
+# Long-term hybrid keys with mnemonic backup phrases
+anyhide keygen --hybrid -o mykeys --show-mnemonic
+# Shows THREE 24-word phrases for the encryption key (X25519 + ML-KEM-d
+# + ML-KEM-z) plus a single 24-word phrase for the Ed25519 signing key.
+# All three encryption phrases are required to restore the hybrid key.
 
 # Ephemeral keys (individual files)
 anyhide keygen -o alice --ephemeral
@@ -190,15 +194,24 @@ Visual Fingerprint:
 
 ## Mnemonic Backup
 
-Export and import long-term keys as 24-word BIP39 phrases for paper backup.
+Export and import long-term keys as BIP39 phrases for paper backup. Classical
+keys use a single 24-word phrase; hybrid PQ keys use **three** 24-word phrases
+because the hybrid secret is 96 bytes (32B X25519 + 64B ML-KEM seed).
 
 ```bash
-# Export existing key to mnemonic
+# Export existing key to mnemonic — classical
 anyhide export-mnemonic mykeys.key
 # Shows 24 words for paper backup
 
 # Export signing key
 anyhide export-mnemonic mykeys.sign.key
+
+# Export hybrid PQ key — emits THREE labeled phrases (1/3, 2/3, 3/3)
+anyhide export-mnemonic mykeys-hybrid.key
+# Detects the HYBRID PEM header and prints all three phrases.
+# Phrase 1/3: X25519 component
+# Phrase 2/3: ML-KEM seed d
+# Phrase 3/3: ML-KEM seed z
 
 # Import encryption key from mnemonic (interactive)
 anyhide import-mnemonic -o restored
@@ -208,9 +221,15 @@ anyhide import-mnemonic -o restored
 # Import signing key from mnemonic
 anyhide import-mnemonic -o restored --key-type signing
 # Creates: restored.sign.key, restored.sign.pub
+
+# Import hybrid PQ encryption key from mnemonic — prompts for all three phrases
+anyhide import-mnemonic -o restored --key-type hybrid
+# Enter phrase 1/3 (X25519), then 2/3 (ML-KEM d), then 3/3 (ML-KEM z).
+# All three checksums are validated independently before reconstructing
+# the 96-byte hybrid secret. Creates: restored.key, restored.pub.
 ```
 
-**Important:** Mnemonic backup is only for long-term private keys (`.key`, `.sign.key`). Ephemeral keys rotate per message and should not be backed up.
+**Important:** Mnemonic backup is only for long-term private keys (`.key`, `.sign.key`). Ephemeral keys rotate per message and should not be backed up. For hybrid PQ keys, **all three phrases** are required to restore the encryption key — keep them clearly labeled with their order (1/3, 2/3, 3/3). Verify the fingerprint after restoration with `anyhide fingerprint <key.pub>`.
 
 ## Contacts
 

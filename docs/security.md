@@ -130,6 +130,20 @@ A hybrid keypair generated via `anyhide keygen --hybrid` is a **fresh identity**
 
 Wire-format / key-flavor mismatches at decode (v6 + hybrid secret, or v7 + classical secret) flow through the never-fail decoder and yield deterministic garbage — no panics, no error signals an attacker could probe.
 
+### BIP39 mnemonic backup for hybrid keys
+
+Classical 32-byte secrets back up to a single 24-word BIP39 phrase. The 96-byte hybrid secret does not fit a single 24-word phrase (24 words encode 256 bits + 8-bit checksum = 32 bytes). Anyhide splits the hybrid secret into three independent 24-word phrases instead of inventing a non-standard word count or word list:
+
+| Phrase | Component | Bytes |
+|--------|-----------|-------|
+| 1/3 | X25519 secret | 32 |
+| 2/3 | ML-KEM seed `d` | 32 |
+| 3/3 | ML-KEM seed `z` | 32 |
+
+Each phrase is a standard 24-word BIP39 mnemonic with its own 8-bit SHA-256 checksum, validated independently. A typo in any one phrase fails fast at restore time with the matching `MnemonicError` rather than producing a silently-corrupted hybrid key. The scheme is reversible — `keygen --hybrid --show-mnemonic` and `import-mnemonic --key-type hybrid` round-trip the secret exactly. Restoration also verifies that all three phrases produce the same 96-byte secret as the one originally exported by checking the resulting public-key fingerprint.
+
+Code reference: `crypto/mnemonic.rs`, `hybrid_key_to_mnemonics` / `mnemonics_to_hybrid_key`.
+
 ### Per-message overhead
 
 Hybrid mode trades size for PQ confidentiality:
@@ -156,7 +170,6 @@ Unlike anyhide codes, the chat protocol forced a hard break at v2:
 ### What is *not* migrated
 
 - **Forward-secrecy ratchet on encoded anyhide codes** (`encode --ratchet`) is rejected with `EncoderError::RatchetUnsupportedForHybrid` for hybrid recipients. The encoder's `EncodedMessage.next_keypair` is X25519-only; emitting a hybrid ephemeral here would misrepresent the ratchet shape. Classical ratchet semantics are unchanged.
-- **BIP39 mnemonic backup** is classical-only. The hybrid secret is 96 bytes (32 B X25519 + 64 B ML-KEM seed), and the standard 24-word BIP39 mnemonic encodes 32-byte secrets. A 27-word or custom scheme for hybrid keys is a follow-up.
 - **Ed25519 signing identities** continue as classical. Authentication of the sender does not benefit from hybrid PQ in the same way confidentiality does — a signature does not protect past messages from future cryptanalysis (it only commits the sender at signing time).
 
 ### Key code references

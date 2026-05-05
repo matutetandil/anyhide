@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use anyhide::crypto::{
-    format_mnemonic, key_to_mnemonic, save_private_key_for_contact,
+    format_mnemonic, hybrid_key_to_mnemonics, key_to_mnemonic, save_private_key_for_contact,
     save_private_key_for_contact_hybrid, save_public_key_for_contact,
     save_public_key_for_contact_hybrid, save_unified_keys_for_contact,
     save_unified_keys_for_contact_hybrid, HybridKeyPair, KeyPair, SigningKeyPair,
@@ -62,13 +62,11 @@ impl CommandExecutor for KeygenCommand {
             eprintln!();
         }
 
-        if self.show_mnemonic && self.hybrid {
-            // BIP39 mnemonic backup is built around 32-byte X25519 secrets;
-            // the hybrid secret is 96 bytes (32B X25519 || 64B ML-KEM seed)
-            // and would need a different backup scheme. Defer to a future
-            // session.
-            eprintln!("WARNING: --show-mnemonic is not yet supported for --hybrid keys.");
-            eprintln!("         Hybrid keys are 96 bytes; BIP39 backup will land in a future release.");
+        if self.show_mnemonic && self.hybrid && self.ephemeral {
+            // Mnemonic backup applies only to long-term hybrid keys. Ephemeral
+            // keys rotate per message and should not be backed up.
+            eprintln!("WARNING: --show-mnemonic is ignored for ephemeral hybrid keys.");
+            eprintln!("         Ephemeral keys rotate per message and should not be backed up.");
             eprintln!();
         }
 
@@ -181,6 +179,12 @@ impl KeygenCommand {
             self.output.display(), self.output.display());
         println!();
         println!("Keep your private keys (.key, .sign.key) secret and secure.");
+
+        // Show mnemonic backup if requested. Hybrid keys use a 3-phrase scheme
+        // because the 96-byte secret cannot fit a single 24-word BIP39 phrase.
+        if self.show_mnemonic {
+            self.show_mnemonic_backup_hybrid(&keypair, &signing_keypair)?;
+        }
 
         Ok(())
     }
@@ -327,6 +331,69 @@ impl KeygenCommand {
         let pem = encode_hybrid_public_key_pem(keypair.public_key(), keypair.key_type())
             .context("Failed to encode hybrid public key as PEM")?;
         println!("{}", pem);
+        Ok(())
+    }
+
+    /// Display mnemonic backup phrases for hybrid keys (3 phrases for the
+    /// 96-byte hybrid secret + 1 phrase for the Ed25519 signing key).
+    fn show_mnemonic_backup_hybrid(
+        &self,
+        keypair: &HybridKeyPair,
+        signing_keypair: &SigningKeyPair,
+    ) -> Result<()> {
+        println!();
+        println!("============================================================");
+        println!("              HYBRID PQ MNEMONIC BACKUP PHRASES");
+        println!("============================================================");
+        println!();
+        println!("Write these down on paper and store in a safe place.");
+        println!("Anyone with these words can restore your private keys.");
+        println!();
+        println!("The hybrid encryption secret is 96 bytes (32B X25519 + 64B");
+        println!("ML-KEM seed) and is split into THREE 24-word phrases. All");
+        println!("three are required to restore the encryption key, in order.");
+        println!();
+
+        let hybrid_secret_bytes = keypair.secret_key().to_bytes();
+        let phrases = hybrid_key_to_mnemonics(&hybrid_secret_bytes);
+
+        println!(
+            "ENCRYPTION KEY ({}) — phrase 1/3 (X25519 component)",
+            self.output.with_extension("key").display()
+        );
+        println!("------------------------");
+        println!("{}", format_mnemonic(&phrases[0]));
+        println!();
+
+        println!(
+            "ENCRYPTION KEY ({}) — phrase 2/3 (ML-KEM seed d)",
+            self.output.with_extension("key").display()
+        );
+        println!("------------------------");
+        println!("{}", format_mnemonic(&phrases[1]));
+        println!();
+
+        println!(
+            "ENCRYPTION KEY ({}) — phrase 3/3 (ML-KEM seed z)",
+            self.output.with_extension("key").display()
+        );
+        println!("------------------------");
+        println!("{}", format_mnemonic(&phrases[2]));
+        println!();
+
+        let signing_bytes: [u8; 32] = signing_keypair.signing_key().to_bytes();
+        let signing_words = key_to_mnemonic(&signing_bytes);
+
+        println!("SIGNING KEY ({}.sign.key)", self.output.display());
+        println!("------------------------");
+        println!("{}", format_mnemonic(&signing_words));
+        println!();
+        println!("To restore: anyhide import-mnemonic -o <output> --key-type hybrid");
+        println!("            anyhide import-mnemonic -o <output> --key-type signing");
+        println!();
+        println!("IMPORTANT: All three encryption phrases are required to restore");
+        println!("           the hybrid key. Verify fingerprints match after restoration.");
+
         Ok(())
     }
 
