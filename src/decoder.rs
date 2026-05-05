@@ -19,11 +19,43 @@ use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 use x25519_dalek::StaticSecret;
 
-use crate::crypto::{decrypt_with_passphrase, verify_signature};
+use crate::crypto::{
+    decrypt_with_passphrase, decrypt_with_passphrase_hybrid, verify_signature, EncryptionError,
+    HybridSecretKey,
+};
 use crate::encoder::EncodedData;
 use crate::text::carrier::{BinaryCarrierSearch, Carrier};
 use crate::text::tokenize::CarrierSearch;
 use crate::VERSION;
+
+/// Internal abstraction over the recipient secret key used by the decoder.
+///
+/// Mirrors the encoder's `RecipientKey`. Public decoder entry points keep
+/// their `&StaticSecret` / `&HybridSecretKey` signatures and construct one of
+/// these variants before forwarding to a shared `*_with_secret` helper. The
+/// final `decrypt_with_passphrase*` call dispatches on the variant so v6
+/// (classical) and v7 (hybrid) wire formats reuse the same fragment-recovery
+/// logic above the cripto layer.
+#[derive(Clone, Copy)]
+enum DecryptionKey<'a> {
+    Classical(&'a StaticSecret),
+    Hybrid(&'a HybridSecretKey),
+}
+
+/// Dispatches to the matching `decrypt_with_passphrase*` variant. Wire-format
+/// mismatches (e.g. handing a v7 code to a classical secret, or vice versa)
+/// surface as the inner crypto layer's natural decryption failure, which the
+/// never-fail decoder converts to pseudorandom output downstream.
+fn dispatch_decrypt(
+    ciphertext: &[u8],
+    passphrase: &str,
+    secret: &DecryptionKey<'_>,
+) -> Result<Vec<u8>, EncryptionError> {
+    match secret {
+        DecryptionKey::Classical(sk) => decrypt_with_passphrase(ciphertext, passphrase, sk),
+        DecryptionKey::Hybrid(hs) => decrypt_with_passphrase_hybrid(ciphertext, passphrase, hs),
+    }
+}
 
 /// Result of decoding a message.
 /// Note: This is ALWAYS returned, even with invalid inputs.
@@ -142,6 +174,22 @@ pub fn decode(
     decode_with_config(code, carrier, passphrase, secret_key, &DecoderConfig::default())
 }
 
+/// Decodes a hybrid (post-quantum) anyhide code using a hybrid secret key.
+///
+/// Mirrors `decode` but accepts a `HybridSecretKey`; produces the same
+/// `DecodedMessage` (never-fail, garbage on bad inputs). Hybrid secrets only
+/// recover messages that were encoded with `encode_hybrid` family — feeding a
+/// classical (v6) code through this path falls back to garbage like any other
+/// mismatch.
+pub fn decode_hybrid(
+    code: &str,
+    carrier: &str,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+) -> DecodedMessage {
+    decode_with_config_hybrid(code, carrier, passphrase, secret_key, &DecoderConfig::default())
+}
+
 /// Decodes a message with custom configuration.
 /// NEVER returns an error - always produces output.
 pub fn decode_with_config(
@@ -149,6 +197,40 @@ pub fn decode_with_config(
     carrier: &str,
     passphrase: &str,
     secret_key: &StaticSecret,
+    config: &DecoderConfig<'_>,
+) -> DecodedMessage {
+    decode_with_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Classical(secret_key),
+        config,
+    )
+}
+
+/// Decodes a hybrid (post-quantum) anyhide code with custom configuration.
+pub fn decode_with_config_hybrid(
+    code: &str,
+    carrier: &str,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+    config: &DecoderConfig<'_>,
+) -> DecodedMessage {
+    decode_with_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Hybrid(secret_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by classical / hybrid `decode_with_config`.
+fn decode_with_config_with_secret(
+    code: &str,
+    carrier: &str,
+    passphrase: &str,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     let code = code.trim();
@@ -167,7 +249,7 @@ pub fn decode_with_config(
             }
 
             // Try to decode this part (without duress handling to avoid infinite recursion)
-            let result = decode_single_payload(part, carrier, passphrase, secret_key, config);
+            let result = decode_single_payload(part, carrier, passphrase, secret, config);
 
             // Check if decryption succeeded by seeing if it's not a fallback
             // We detect success by checking if the decryption/deserialization worked
@@ -190,7 +272,7 @@ pub fn decode_with_config(
     }
 
     // Single payload (no duress) - decode normally
-    let result = decode_single_payload(code, carrier, passphrase, secret_key, config);
+    let result = decode_single_payload(code, carrier, passphrase, secret, config);
     result.message
 }
 
@@ -205,7 +287,7 @@ fn decode_single_payload(
     code: &str,
     carrier: &str,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodeAttempt {
     let carrier = carrier.trim();
@@ -236,8 +318,8 @@ fn decode_single_payload(
         eprintln!("Decoded {} bytes from base64", encrypted.len());
     }
 
-    // Step 2: Decrypt (asymmetric then symmetric)
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    // Step 2: Decrypt (asymmetric — classical or hybrid — then symmetric)
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             if config.verbose {
@@ -448,6 +530,22 @@ pub fn decode_with_carrier(
     decode_with_carrier_config(code, carrier, passphrase, secret_key, &DecoderConfig::default())
 }
 
+/// Decodes a hybrid (post-quantum) anyhide code with a generic carrier.
+pub fn decode_with_carrier_hybrid(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+) -> DecodedMessage {
+    decode_with_carrier_config_hybrid(
+        code,
+        carrier,
+        passphrase,
+        secret_key,
+        &DecoderConfig::default(),
+    )
+}
+
 /// Decodes with a generic carrier and custom configuration.
 /// NEVER returns an error - always produces output.
 pub fn decode_with_carrier_config(
@@ -455,6 +553,40 @@ pub fn decode_with_carrier_config(
     carrier: &Carrier,
     passphrase: &str,
     secret_key: &StaticSecret,
+    config: &DecoderConfig<'_>,
+) -> DecodedMessage {
+    decode_with_carrier_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Classical(secret_key),
+        config,
+    )
+}
+
+/// Decodes a hybrid (post-quantum) anyhide code with a generic carrier and custom configuration.
+pub fn decode_with_carrier_config_hybrid(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+    config: &DecoderConfig<'_>,
+) -> DecodedMessage {
+    decode_with_carrier_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Hybrid(secret_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by classical / hybrid `decode_with_carrier_config`.
+fn decode_with_carrier_config_with_secret(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     let code = code.trim();
@@ -473,10 +605,10 @@ pub fn decode_with_carrier_config(
 
             let result = match carrier {
                 Carrier::Text(text_carrier) => {
-                    decode_text_carrier_attempt(part, text_carrier, passphrase, secret_key, config)
+                    decode_text_carrier_attempt_with_secret(part, text_carrier, passphrase, secret, config)
                 }
                 Carrier::Binary(binary_carrier) => {
-                    decode_binary_carrier_attempt(part, binary_carrier, passphrase, secret_key, config)
+                    decode_binary_carrier_attempt_with_secret(part, binary_carrier, passphrase, secret, config)
                 }
             };
 
@@ -498,20 +630,20 @@ pub fn decode_with_carrier_config(
     // Single payload - decode normally
     match carrier {
         Carrier::Text(text_carrier) => {
-            decode_text_carrier(code, text_carrier, passphrase, secret_key, config)
+            decode_text_carrier_with_secret(code, text_carrier, passphrase, secret, config)
         }
         Carrier::Binary(binary_carrier) => {
-            decode_binary_carrier(code, binary_carrier, passphrase, secret_key, config)
+            decode_binary_carrier_with_secret(code, binary_carrier, passphrase, secret, config)
         }
     }
 }
 
 /// Decodes using a text carrier (internal).
-fn decode_text_carrier(
+fn decode_text_carrier_with_secret(
     code: &str,
     carrier: &CarrierSearch,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     if carrier.is_empty() {
@@ -534,7 +666,7 @@ fn decode_text_carrier(
     }
 
     // Step 2: Decrypt
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             if config.verbose {
@@ -659,11 +791,11 @@ fn decode_text_carrier(
 }
 
 /// Decodes using a text carrier (internal) - returns attempt result for duress detection.
-fn decode_text_carrier_attempt(
+fn decode_text_carrier_attempt_with_secret(
     code: &str,
     carrier: &CarrierSearch,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodeAttempt {
     if carrier.is_empty() {
@@ -683,7 +815,7 @@ fn decode_text_carrier_attempt(
         }
     };
 
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             return DecodeAttempt {
@@ -705,17 +837,17 @@ fn decode_text_carrier_attempt(
 
     // If we got here, decode was successful
     DecodeAttempt {
-        message: decode_text_carrier(code, carrier, passphrase, secret_key, config),
+        message: decode_text_carrier_with_secret(code, carrier, passphrase, secret, config),
         is_valid_decode: true,
     }
 }
 
 /// Decodes using a binary carrier.
-fn decode_binary_carrier(
+fn decode_binary_carrier_with_secret(
     code: &str,
     carrier: &BinaryCarrierSearch,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodedMessage {
     if carrier.is_empty() {
@@ -738,7 +870,7 @@ fn decode_binary_carrier(
     }
 
     // Step 2: Decrypt
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             if config.verbose {
@@ -866,11 +998,11 @@ fn decode_binary_carrier(
 }
 
 /// Decodes using a binary carrier (internal) - returns attempt result for duress detection.
-fn decode_binary_carrier_attempt(
+fn decode_binary_carrier_attempt_with_secret(
     code: &str,
     carrier: &BinaryCarrierSearch,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodeAttempt {
     if carrier.is_empty() {
@@ -890,7 +1022,7 @@ fn decode_binary_carrier_attempt(
         }
     };
 
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             return DecodeAttempt {
@@ -912,7 +1044,7 @@ fn decode_binary_carrier_attempt(
 
     // If we got here, decode was successful
     DecodeAttempt {
-        message: decode_binary_carrier(code, carrier, passphrase, secret_key, config),
+        message: decode_binary_carrier_with_secret(code, carrier, passphrase, secret, config),
         is_valid_decode: true,
     }
 }
@@ -991,6 +1123,22 @@ pub fn decode_bytes_with_carrier(
     decode_bytes_with_carrier_config(code, carrier, passphrase, secret_key, &DecoderConfig::default())
 }
 
+/// Decodes hybrid (post-quantum) binary data from a carrier.
+pub fn decode_bytes_with_carrier_hybrid(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+) -> DecodedBytes {
+    decode_bytes_with_carrier_config_hybrid(
+        code,
+        carrier,
+        passphrase,
+        secret_key,
+        &DecoderConfig::default(),
+    )
+}
+
 /// Decodes binary data with custom configuration.
 /// NEVER returns an error - always produces output.
 pub fn decode_bytes_with_carrier_config(
@@ -1000,26 +1148,60 @@ pub fn decode_bytes_with_carrier_config(
     secret_key: &StaticSecret,
     config: &DecoderConfig<'_>,
 ) -> DecodedBytes {
+    decode_bytes_with_carrier_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Classical(secret_key),
+        config,
+    )
+}
+
+/// Decodes hybrid (post-quantum) binary data with custom configuration.
+pub fn decode_bytes_with_carrier_config_hybrid(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret_key: &HybridSecretKey,
+    config: &DecoderConfig<'_>,
+) -> DecodedBytes {
+    decode_bytes_with_carrier_config_with_secret(
+        code,
+        carrier,
+        passphrase,
+        &DecryptionKey::Hybrid(secret_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by classical / hybrid `decode_bytes_with_carrier_config`.
+fn decode_bytes_with_carrier_config_with_secret(
+    code: &str,
+    carrier: &Carrier,
+    passphrase: &str,
+    secret: &DecryptionKey<'_>,
+    config: &DecoderConfig<'_>,
+) -> DecodedBytes {
     // For binary decoding, we need byte-level extraction
     match carrier {
         Carrier::Binary(binary_carrier) => {
-            decode_bytes_binary_carrier(code, binary_carrier, passphrase, secret_key, config)
+            decode_bytes_binary_carrier_with_secret(code, binary_carrier, passphrase, secret, config)
         }
         Carrier::Text(text_carrier) => {
             // Convert text carrier to binary for byte-level operations
             let text_bytes = text_carrier.original.as_bytes().to_vec();
             let binary_carrier = BinaryCarrierSearch::new(text_bytes);
-            decode_bytes_binary_carrier(code, &binary_carrier, passphrase, secret_key, config)
+            decode_bytes_binary_carrier_with_secret(code, &binary_carrier, passphrase, secret, config)
         }
     }
 }
 
 /// Internal: decodes binary data from a binary carrier.
-fn decode_bytes_binary_carrier(
+fn decode_bytes_binary_carrier_with_secret(
     code: &str,
     carrier: &BinaryCarrierSearch,
     passphrase: &str,
-    secret_key: &StaticSecret,
+    secret: &DecryptionKey<'_>,
     config: &DecoderConfig<'_>,
 ) -> DecodedBytes {
     if carrier.is_empty() {
@@ -1042,7 +1224,7 @@ fn decode_bytes_binary_carrier(
     }
 
     // Step 2: Decrypt
-    let decrypted = match decrypt_with_passphrase(&encrypted, passphrase, secret_key) {
+    let decrypted = match dispatch_decrypt(&encrypted, passphrase, secret) {
         Ok(data) => data,
         Err(_) => {
             if config.verbose {
@@ -1340,5 +1522,88 @@ mod tests {
 
         // Same inputs should produce same garbage
         assert_eq!(decoded1.message, decoded2.message);
+    }
+
+    #[test]
+    fn hybrid_encode_decode_roundtrip() {
+        use crate::crypto::HybridKeyPair;
+        use crate::encoder::encode_hybrid;
+
+        let carrier = "Amanda fue al parque con su hermano ayer por la tarde";
+        let message = "ama parque";
+        let passphrase = "test123";
+
+        let keypair = HybridKeyPair::generate();
+
+        let encoded = encode_hybrid(carrier, message, passphrase, keypair.public_key()).unwrap();
+        let decoded = decode_hybrid(&encoded.code, carrier, passphrase, keypair.secret_key());
+
+        assert!(decoded.message.to_lowercase().contains("ama"));
+        assert!(decoded.message.to_lowercase().contains("parque"));
+    }
+
+    #[test]
+    fn hybrid_decode_with_wrong_secret_returns_garbage() {
+        use crate::crypto::HybridKeyPair;
+        use crate::encoder::encode_hybrid;
+
+        let carrier = "Amanda fue al parque con su hermano ayer";
+        let message = "ama parque";
+        let passphrase = "p";
+
+        let keypair = HybridKeyPair::generate();
+        let other = HybridKeyPair::generate();
+
+        let encoded = encode_hybrid(carrier, message, passphrase, keypair.public_key()).unwrap();
+        let decoded = decode_hybrid(&encoded.code, carrier, passphrase, other.secret_key());
+
+        // Never-fail: must return some output but should not recover the message
+        assert!(!decoded.message.is_empty());
+        let lower = decoded.message.to_lowercase();
+        assert!(!(lower.contains("ama") && lower.contains("parque")));
+    }
+
+    #[test]
+    fn classical_decode_of_hybrid_code_returns_garbage() {
+        use crate::crypto::HybridKeyPair;
+        use crate::encoder::encode_hybrid;
+
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama parque";
+        let passphrase = "p";
+
+        let hybrid = HybridKeyPair::generate();
+        let classical = KeyPair::generate();
+
+        // Encode v7 (hybrid wire format) then attempt v6 (classical) decode.
+        // The cripto layer fails, the never-fail decoder produces deterministic garbage.
+        let encoded = encode_hybrid(carrier, message, passphrase, hybrid.public_key()).unwrap();
+        let decoded = decode(&encoded.code, carrier, passphrase, classical.secret_key());
+
+        assert!(!decoded.message.is_empty());
+        let lower = decoded.message.to_lowercase();
+        assert!(!(lower.contains("ama") && lower.contains("parque")));
+    }
+
+    #[test]
+    fn hybrid_decode_of_classical_code_returns_garbage() {
+        use crate::crypto::HybridKeyPair;
+        use crate::encoder::encode;
+
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama parque";
+        let passphrase = "p";
+
+        let classical = KeyPair::generate();
+        let hybrid = HybridKeyPair::generate();
+
+        // Encode v6 (classical) then attempt v7 (hybrid) decode. The hybrid
+        // layer rejects the missing magic prefix; never-fail produces garbage.
+        let encoded = encode(carrier, message, passphrase, classical.public_key()).unwrap();
+        let decoded = decode_hybrid(&encoded.code, carrier, passphrase, hybrid.secret_key());
+
+        assert!(!decoded.message.is_empty());
+        let lower = decoded.message.to_lowercase();
+        assert!(!(lower.contains("ama") && lower.contains("parque")));
     }
 }

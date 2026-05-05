@@ -22,7 +22,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x25519_dalek::PublicKey;
 
-use crate::crypto::{encrypt_with_passphrase, sign_message, EncryptionError, KeyPair};
+use crate::crypto::{
+    encrypt_with_passphrase, encrypt_with_passphrase_hybrid, sign_message, EncryptionError,
+    HybridPublicKey, KeyPair,
+};
 use crate::text::carrier::{fragment_bytes_for_carrier, fragment_message_for_binary, BinaryCarrierSearch, Carrier};
 use crate::text::fragment::{fragment_message_adaptive, FoundFragment};
 use crate::text::tokenize::{select_distributed_position, CarrierSearch};
@@ -30,6 +33,36 @@ use crate::{BLOCK_SIZE, MIN_SIZE, VERSION};
 
 /// HKDF salt for padding generation.
 const SALT_PAD: &[u8] = b"KAMO-PAD-V5";
+
+/// Internal abstraction over the recipient public key used by the encoder.
+///
+/// The four encoder entry points (`encode_with_config`, `encode_text_carrier`,
+/// `encode_binary_carrier`, `encode_bytes_binary_carrier`) historically took
+/// `&x25519_dalek::PublicKey`; their hybrid PQ counterparts take
+/// `&HybridPublicKey`. To avoid duplicating ~600 lines of fragmentation /
+/// padding / signing logic, the public functions are thin wrappers that
+/// construct one of these variants and forward to a shared `*_with_recipient`
+/// helper.
+#[derive(Clone, Copy)]
+enum RecipientKey<'a> {
+    Classical(&'a PublicKey),
+    Hybrid(&'a HybridPublicKey),
+}
+
+/// Dispatches to the matching `encrypt_with_passphrase*` variant based on the
+/// recipient's key type. Used by every encoder helper at its final encryption
+/// step so that classical (v6) and hybrid (v7) wire formats are produced from
+/// the same encoding pipeline.
+fn dispatch_encrypt(
+    plaintext: &[u8],
+    passphrase: &str,
+    recipient: &RecipientKey<'_>,
+) -> Result<Vec<u8>, EncryptionError> {
+    match recipient {
+        RecipientKey::Classical(pk) => encrypt_with_passphrase(plaintext, passphrase, pk),
+        RecipientKey::Hybrid(pk) => encrypt_with_passphrase_hybrid(plaintext, passphrase, pk),
+    }
+}
 
 /// Errors that can occur during encoding.
 #[derive(Error, Debug)]
@@ -45,6 +78,10 @@ pub enum EncoderError {
 
     #[error("Encryption error: {0}")]
     EncryptionError(#[from] EncryptionError),
+
+    #[error("Forward-secrecy ratchet is not yet supported with hybrid post-quantum recipients. \
+             Encode without --ratchet, or use a classical recipient key for ratcheted exchanges.")]
+    RatchetUnsupportedForHybrid,
 
     #[error("Empty message")]
     EmptyMessage,
@@ -246,12 +283,67 @@ pub fn encode(
     encode_with_config(carrier, message, passphrase, public_key, &EncoderConfig::default())
 }
 
-/// Encodes a message with custom configuration.
+/// Encodes a message with custom configuration (classical X25519 recipient).
 pub fn encode_with_config(
     carrier: &str,
     message: &str,
     passphrase: &str,
     public_key: &PublicKey,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_config_with_recipient(
+        carrier,
+        message,
+        passphrase,
+        &RecipientKey::Classical(public_key),
+        config,
+    )
+}
+
+/// Encodes a message for a hybrid (X25519 + ML-KEM-768) post-quantum recipient.
+///
+/// Produces a v7 anyhide code (carrying the hybrid wire-format magic prefix).
+/// The recipient must be addressed by a `HybridPublicKey`; classical recipients
+/// continue to go through `encode` / `encode_with_config`.
+///
+/// Forward-secrecy ratchet (`config.ratchet = true`) is rejected with
+/// `EncoderError::RatchetUnsupportedForHybrid` because the encoder still emits
+/// classical X25519 ratchet keypairs; the hybrid ratchet is a follow-up.
+pub fn encode_hybrid(
+    carrier: &str,
+    message: &str,
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_config_hybrid(carrier, message, passphrase, public_key, &EncoderConfig::default())
+}
+
+/// Encodes a message for a hybrid recipient with custom configuration.
+pub fn encode_with_config_hybrid(
+    carrier: &str,
+    message: &str,
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_config_with_recipient(
+        carrier,
+        message,
+        passphrase,
+        &RecipientKey::Hybrid(public_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by the classical and hybrid `encode_with_config`
+/// public wrappers. Dispatches the final encryption step based on the
+/// `RecipientKey` variant; everything above (fragmentation, padding, signing,
+/// optional ratchet) is independent of the recipient's key flavor.
+fn encode_with_config_with_recipient(
+    carrier: &str,
+    message: &str,
+    passphrase: &str,
+    recipient: &RecipientKey<'_>,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
@@ -426,7 +518,15 @@ pub fn encode_with_config(
         None
     };
 
-    // Step 6: Generate next ephemeral keypair if ratchet is enabled
+    // Step 6: Generate next ephemeral keypair if ratchet is enabled.
+    // Hybrid recipients can't ratchet yet — the EncodedMessage carries an
+    // X25519-only `next_keypair` and `next_public_key` is consumed by the
+    // classical decoder loader, so producing a hybrid ephemeral here would
+    // misrepresent the format. Reject the combination explicitly so users
+    // notice instead of silently degrading.
+    if config.ratchet && matches!(recipient, RecipientKey::Hybrid(_)) {
+        return Err(EncoderError::RatchetUnsupportedForHybrid);
+    }
     let (next_public_key, next_keypair) = if config.ratchet {
         let new_keypair = KeyPair::generate_ephemeral();
         let public_bytes = new_keypair.public_key().as_bytes().to_vec();
@@ -456,8 +556,8 @@ pub fn encode_with_config(
         eprintln!("Serialized to {} bytes", serialized.len());
     }
 
-    // Step 9: Encrypt (symmetric with passphrase, then asymmetric with public key)
-    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    // Step 9: Encrypt (symmetric with passphrase, then asymmetric — classical or hybrid)
+    let encrypted = dispatch_encrypt(&serialized, passphrase, recipient)?;
 
     // Step 10: Encode to base64
     let primary_code = BASE64.encode(&encrypted);
@@ -479,12 +579,14 @@ pub fn encode_with_config(
             decoy: None,    // No nested decoys
         };
 
-        // Encode the decoy message with its own passphrase
-        let decoy_result = encode_with_config(
+        // Encode the decoy message with its own passphrase, preserving the
+        // recipient flavor (classical vs hybrid) so both halves of the
+        // composed code share the same wire format.
+        let decoy_result = encode_with_config_with_recipient(
             carrier,
             decoy_config.message,
             decoy_config.passphrase,
-            public_key,
+            recipient,
             &decoy_encoder_config,
         )?;
 
@@ -573,6 +675,22 @@ pub fn encode_with_carrier(
     encode_with_carrier_config(carrier, message, passphrase, public_key, &EncoderConfig::default())
 }
 
+/// Encodes a message with a generic carrier (text or binary) for a hybrid PQ recipient.
+pub fn encode_with_carrier_hybrid(
+    carrier: &Carrier,
+    message: &str,
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_carrier_config_hybrid(
+        carrier,
+        message,
+        passphrase,
+        public_key,
+        &EncoderConfig::default(),
+    )
+}
+
 /// Encodes a message with a generic carrier and custom configuration.
 pub fn encode_with_carrier_config(
     carrier: &Carrier,
@@ -581,13 +699,47 @@ pub fn encode_with_carrier_config(
     public_key: &PublicKey,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
+    encode_with_carrier_config_with_recipient(
+        carrier,
+        message,
+        passphrase,
+        &RecipientKey::Classical(public_key),
+        config,
+    )
+}
+
+/// Encodes a message with a generic carrier and custom configuration for a hybrid PQ recipient.
+pub fn encode_with_carrier_config_hybrid(
+    carrier: &Carrier,
+    message: &str,
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_with_carrier_config_with_recipient(
+        carrier,
+        message,
+        passphrase,
+        &RecipientKey::Hybrid(public_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by classical / hybrid `encode_with_carrier_config`.
+fn encode_with_carrier_config_with_recipient(
+    carrier: &Carrier,
+    message: &str,
+    passphrase: &str,
+    recipient: &RecipientKey<'_>,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
     // Encode the primary message
     let primary_result = match carrier {
         Carrier::Text(text_carrier) => {
-            encode_text_carrier(text_carrier, message, passphrase, public_key, config)
+            encode_text_carrier_with_recipient(text_carrier, message, passphrase, recipient, config)
         }
         Carrier::Binary(binary_carrier) => {
-            encode_binary_carrier(binary_carrier, message, passphrase, public_key, config)
+            encode_binary_carrier_with_recipient(binary_carrier, message, passphrase, recipient, config)
         }
     }?;
 
@@ -609,12 +761,20 @@ pub fn encode_with_carrier_config(
         };
 
         let decoy_result = match carrier {
-            Carrier::Text(text_carrier) => {
-                encode_text_carrier(text_carrier, decoy_config.message, decoy_config.passphrase, public_key, &decoy_encoder_config)
-            }
-            Carrier::Binary(binary_carrier) => {
-                encode_binary_carrier(binary_carrier, decoy_config.message, decoy_config.passphrase, public_key, &decoy_encoder_config)
-            }
+            Carrier::Text(text_carrier) => encode_text_carrier_with_recipient(
+                text_carrier,
+                decoy_config.message,
+                decoy_config.passphrase,
+                recipient,
+                &decoy_encoder_config,
+            ),
+            Carrier::Binary(binary_carrier) => encode_binary_carrier_with_recipient(
+                binary_carrier,
+                decoy_config.message,
+                decoy_config.passphrase,
+                recipient,
+                &decoy_encoder_config,
+            ),
         }?;
 
         if config.verbose {
@@ -634,11 +794,11 @@ pub fn encode_with_carrier_config(
 }
 
 /// Encodes using a text carrier (internal, reuses existing logic).
-fn encode_text_carrier(
+fn encode_text_carrier_with_recipient(
     carrier: &CarrierSearch,
     message: &str,
     passphrase: &str,
-    public_key: &PublicKey,
+    recipient: &RecipientKey<'_>,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
@@ -785,7 +945,11 @@ fn encode_text_carrier(
         None
     };
 
-    // Generate next ephemeral keypair if ratchet is enabled
+    // Generate next ephemeral keypair if ratchet is enabled.
+    // Hybrid recipients can't ratchet yet — see encode_with_config_with_recipient.
+    if config.ratchet && matches!(recipient, RecipientKey::Hybrid(_)) {
+        return Err(EncoderError::RatchetUnsupportedForHybrid);
+    }
     let (next_public_key, next_keypair) = if config.ratchet {
         let new_keypair = KeyPair::generate_ephemeral();
         let public_bytes = new_keypair.public_key().as_bytes().to_vec();
@@ -809,7 +973,7 @@ fn encode_text_carrier(
     let serialized = bincode::serialize(&data)
         .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
 
-    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let encrypted = dispatch_encrypt(&serialized, passphrase, recipient)?;
     let code = BASE64.encode(&encrypted);
 
     Ok(EncodedMessage {
@@ -824,11 +988,11 @@ fn encode_text_carrier(
 ///
 /// For binary carriers, the message is converted to bytes and searched
 /// as byte sequences within the carrier data.
-fn encode_binary_carrier(
+fn encode_binary_carrier_with_recipient(
     carrier: &BinaryCarrierSearch,
     message: &str,
     passphrase: &str,
-    public_key: &PublicKey,
+    recipient: &RecipientKey<'_>,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
@@ -925,7 +1089,11 @@ fn encode_binary_carrier(
         None
     };
 
-    // Generate next ephemeral keypair if ratchet is enabled
+    // Generate next ephemeral keypair if ratchet is enabled.
+    // Hybrid recipients can't ratchet yet — see encode_with_config_with_recipient.
+    if config.ratchet && matches!(recipient, RecipientKey::Hybrid(_)) {
+        return Err(EncoderError::RatchetUnsupportedForHybrid);
+    }
     let (next_public_key, next_keypair) = if config.ratchet {
         let new_keypair = KeyPair::generate_ephemeral();
         let public_bytes = new_keypair.public_key().as_bytes().to_vec();
@@ -949,7 +1117,7 @@ fn encode_binary_carrier(
     let serialized = bincode::serialize(&data)
         .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
 
-    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let encrypted = dispatch_encrypt(&serialized, passphrase, recipient)?;
     let code = BASE64.encode(&encrypted);
 
     Ok(EncodedMessage {
@@ -1029,12 +1197,62 @@ pub fn encode_bytes_with_carrier(
     encode_bytes_with_carrier_config(carrier, data, passphrase, public_key, &EncoderConfig::default())
 }
 
+/// Encodes binary data with a generic carrier for a hybrid PQ recipient.
+pub fn encode_bytes_with_carrier_hybrid(
+    carrier: &Carrier,
+    data: &[u8],
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_bytes_with_carrier_config_hybrid(
+        carrier,
+        data,
+        passphrase,
+        public_key,
+        &EncoderConfig::default(),
+    )
+}
+
 /// Encodes binary data with custom configuration.
 pub fn encode_bytes_with_carrier_config(
     carrier: &Carrier,
     data: &[u8],
     passphrase: &str,
     public_key: &PublicKey,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_bytes_with_carrier_config_with_recipient(
+        carrier,
+        data,
+        passphrase,
+        &RecipientKey::Classical(public_key),
+        config,
+    )
+}
+
+/// Encodes binary data with custom configuration for a hybrid PQ recipient.
+pub fn encode_bytes_with_carrier_config_hybrid(
+    carrier: &Carrier,
+    data: &[u8],
+    passphrase: &str,
+    public_key: &HybridPublicKey,
+    config: &EncoderConfig<'_>,
+) -> Result<EncodedMessage, EncoderError> {
+    encode_bytes_with_carrier_config_with_recipient(
+        carrier,
+        data,
+        passphrase,
+        &RecipientKey::Hybrid(public_key),
+        config,
+    )
+}
+
+/// Internal implementation shared by classical / hybrid `encode_bytes_with_carrier_config`.
+fn encode_bytes_with_carrier_config_with_recipient(
+    carrier: &Carrier,
+    data: &[u8],
+    passphrase: &str,
+    recipient: &RecipientKey<'_>,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     // Validate inputs
@@ -1049,24 +1267,24 @@ pub fn encode_bytes_with_carrier_config(
     // For binary data, we need a binary carrier for byte-level searching
     match carrier {
         Carrier::Binary(binary_carrier) => {
-            encode_bytes_binary_carrier(binary_carrier, data, passphrase, public_key, config)
+            encode_bytes_binary_carrier_with_recipient(binary_carrier, data, passphrase, recipient, config)
         }
         Carrier::Text(text_carrier) => {
             // Convert text carrier to binary for byte-level operations
             // This allows using text files as carriers for binary messages too
             let text_bytes = text_carrier.original.as_bytes().to_vec();
             let binary_carrier = BinaryCarrierSearch::new(text_bytes);
-            encode_bytes_binary_carrier(&binary_carrier, data, passphrase, public_key, config)
+            encode_bytes_binary_carrier_with_recipient(&binary_carrier, data, passphrase, recipient, config)
         }
     }
 }
 
 /// Internal: encodes binary data using a binary carrier.
-fn encode_bytes_binary_carrier(
+fn encode_bytes_binary_carrier_with_recipient(
     carrier: &BinaryCarrierSearch,
     data: &[u8],
     passphrase: &str,
-    public_key: &PublicKey,
+    recipient: &RecipientKey<'_>,
     config: &EncoderConfig<'_>,
 ) -> Result<EncodedMessage, EncoderError> {
     if config.verbose {
@@ -1151,7 +1369,11 @@ fn encode_bytes_binary_carrier(
         None
     };
 
-    // Generate next ephemeral keypair if ratchet is enabled
+    // Generate next ephemeral keypair if ratchet is enabled.
+    // Hybrid recipients can't ratchet yet — see encode_with_config_with_recipient.
+    if config.ratchet && matches!(recipient, RecipientKey::Hybrid(_)) {
+        return Err(EncoderError::RatchetUnsupportedForHybrid);
+    }
     let (next_public_key, next_keypair) = if config.ratchet {
         let new_keypair = KeyPair::generate_ephemeral();
         let public_bytes = new_keypair.public_key().as_bytes().to_vec();
@@ -1175,7 +1397,7 @@ fn encode_bytes_binary_carrier(
     let serialized = bincode::serialize(&encoded_data)
         .map_err(|e| EncoderError::SerializationError(e.to_string()))?;
 
-    let encrypted = encrypt_with_passphrase(&serialized, passphrase, public_key)?;
+    let encrypted = dispatch_encrypt(&serialized, passphrase, recipient)?;
     let code = BASE64.encode(&encrypted);
 
     Ok(EncodedMessage {
@@ -1331,5 +1553,54 @@ mod tests {
         let result = encode(carrier, message, passphrase, keypair.public_key());
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn hybrid_encode_emits_v7_wire_prefix() {
+        use crate::crypto::{detect_wire_format, HybridKeyPair, WireFormat};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama";
+        let passphrase = "test";
+
+        let keypair = HybridKeyPair::generate();
+        let encoded = encode_hybrid(carrier, message, passphrase, keypair.public_key()).unwrap();
+
+        let raw = BASE64.decode(&encoded.code).expect("base64 decodes");
+        assert_eq!(detect_wire_format(&raw), WireFormat::HybridV7);
+    }
+
+    #[test]
+    fn classical_encode_does_not_emit_v7_wire_prefix() {
+        use crate::crypto::{detect_wire_format, WireFormat};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama";
+        let passphrase = "test";
+
+        let keypair = KeyPair::generate();
+        let encoded = encode(carrier, message, passphrase, keypair.public_key()).unwrap();
+
+        let raw = BASE64.decode(&encoded.code).expect("base64 decodes");
+        assert_eq!(detect_wire_format(&raw), WireFormat::ClassicalV6);
+    }
+
+    #[test]
+    fn hybrid_encode_rejects_ratchet_config() {
+        use crate::crypto::HybridKeyPair;
+
+        let carrier = "Amanda fue al parque con su hermano";
+        let message = "ama";
+        let passphrase = "test";
+
+        let keypair = HybridKeyPair::generate();
+        let mut config = EncoderConfig::default();
+        config.ratchet = true;
+
+        let result = encode_with_config_hybrid(carrier, message, passphrase, keypair.public_key(), &config);
+
+        assert!(matches!(result, Err(EncoderError::RatchetUnsupportedForHybrid)));
     }
 }

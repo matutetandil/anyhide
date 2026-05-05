@@ -127,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Existing `encrypt_with_passphrase` / `decrypt_with_passphrase` (classical X25519) untouched — backward compatibility for v6 codes is preserved at the byte level
   - 8 unit tests: round-trip, magic prefix emission, format detection (v6 vs v7), short-input fallback, classical input rejection, unsupported-version rejection, wrong-secret rejection, wrong-passphrase rejection
 
+- **Hybrid encoder / decoder entry points** (`encoder.rs`, `decoder.rs`)
+  - 6 new public encoder functions (`encode_hybrid`, `encode_with_config_hybrid`, `encode_with_carrier_hybrid`, `encode_with_carrier_config_hybrid`, `encode_bytes_with_carrier_hybrid`, `encode_bytes_with_carrier_config_hybrid`) that take `&HybridPublicKey` and emit v7 wire-format codes
+  - 6 new public decoder functions (`decode_hybrid`, `decode_with_config_hybrid`, `decode_with_carrier_hybrid`, `decode_with_carrier_config_hybrid`, `decode_bytes_with_carrier_hybrid`, `decode_bytes_with_carrier_config_hybrid`) that take `&HybridSecretKey` and consume v7 codes
+  - Existing classical `encode*` / `decode*` functions retain their `&PublicKey` / `&StaticSecret` signatures — backward-compatible for v6 codes
+  - Internal `RecipientKey<'a>` (encoder) and `DecryptionKey<'a>` (decoder) enums + `dispatch_encrypt` / `dispatch_decrypt` helpers share fragmentation / padding / signing logic between classical and hybrid paths instead of duplicating ~600 lines
+  - New `EncoderError::RatchetUnsupportedForHybrid`: forward-secrecy ratchet (`config.ratchet = true`) is rejected with hybrid recipients because `EncodedMessage.next_keypair` is X25519-only and the hybrid ratchet is a follow-up. Classical ratchet semantics are unchanged
+  - Wire-format mismatches (v7 code + classical secret, or v6 code + hybrid secret) decrypt to garbage via the existing never-fail decoder semantics — no panics, no leaked information
+  - 4 new decoder tests + 3 new encoder tests covering: hybrid round-trip, hybrid wrong-secret garbage, classical-decoder rejecting v7 input, hybrid-decoder rejecting v6 input, v7 magic-prefix emission, v6 magic-prefix absence, hybrid-encoder rejecting `--ratchet`
+  - Total tests: 388 → 395
+  - All hybrid functions re-exported at the crate root in `lib.rs`
+
 - **`keygen --hybrid` flag** (`commands/keygen.rs`)
   - New `--hybrid` flag generates a `HybridKeyPair` (X25519 + ML-KEM-768) for encryption alongside the standard Ed25519 signing keypair
   - Required for chat protocol v2 — classical X25519 keys are no longer accepted by the chat handshake

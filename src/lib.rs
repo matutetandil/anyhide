@@ -111,13 +111,18 @@ pub use crypto::{
     generate_and_save_ephemeral_for_contact,
 };
 pub use decoder::{
-    decode, decode_bytes_with_carrier, decode_bytes_with_carrier_config, decode_with_carrier,
-    decode_with_carrier_config, decode_with_config, DecodedBytes, DecodedMessage, DecoderConfig,
+    decode, decode_bytes_with_carrier, decode_bytes_with_carrier_config,
+    decode_bytes_with_carrier_config_hybrid, decode_bytes_with_carrier_hybrid, decode_hybrid,
+    decode_with_carrier, decode_with_carrier_config, decode_with_carrier_config_hybrid,
+    decode_with_carrier_hybrid, decode_with_config, decode_with_config_hybrid, DecodedBytes,
+    DecodedMessage, DecoderConfig,
 };
 pub use encoder::{
-    encode, encode_bytes_with_carrier, encode_bytes_with_carrier_config, encode_with_carrier,
-    encode_with_carrier_config, encode_with_config, DecoyConfig, EncodedData, EncodedMessage,
-    EncoderConfig, EncoderError,
+    encode, encode_bytes_with_carrier, encode_bytes_with_carrier_config,
+    encode_bytes_with_carrier_config_hybrid, encode_bytes_with_carrier_hybrid, encode_hybrid,
+    encode_with_carrier, encode_with_carrier_config, encode_with_carrier_config_hybrid,
+    encode_with_carrier_hybrid, encode_with_config, encode_with_config_hybrid, DecoyConfig,
+    EncodedData, EncodedMessage, EncoderConfig, EncoderError,
 };
 pub use qr::{decode_base45, encode_base45, generate_qr, read_qr, QrError, QrFormat};
 pub use text::carrier::{fragment_bytes_for_carrier, BinaryCarrierSearch, BinaryFragment, Carrier};
