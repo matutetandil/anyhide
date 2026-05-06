@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-05-06
+
+### Fixed
+
+- `anyhide --version` now reports the correct package version. Previously the version string in the CLI parser was a hardcoded literal (`"0.13.0"`) that drifted from `Cargo.toml` across the v0.14.0 bump, so v0.14.0 binaries identified themselves as `anyhide 0.13.0`. The CLI now derives its version from `CARGO_PKG_VERSION` at build time, so the reported version always matches `Cargo.toml`.
+
 ## [0.14.0] - 2026-05-05
 
 ### Highlights

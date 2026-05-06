@@ -29,7 +29,7 @@ use commands::{
 /// Use ANY file as a pre-shared carrier - only encrypted codes are transmitted.
 #[derive(Parser)]
 #[command(name = "anyhide")]
-#[command(version = "0.13.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Hide anything in anything - advanced steganography with encryption")]
 #[command(long_about = None)]
 struct Cli {

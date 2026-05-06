@@ -120,4 +120,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Version
 
-Current version: 0.14.0 (see [CHANGELOG.md](CHANGELOG.md))
+Current version: 0.14.1 (see [CHANGELOG.md](CHANGELOG.md))
