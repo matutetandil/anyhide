@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-06
+
+### Highlights
+
+This release consolidates all on-disk Anyhide data under a single home directory, `~/.anyhide/`, with explicit `state/` and `cache/` separation. Previously chat profiles and Tor data were scattered across OS-specific locations, making backup, migration, and even just *finding* your identity harder than it should be. The new layout is identical across macOS, Linux, and Windows: `state/` holds your onion service keys (treat as backup material), `cache/` is safe to delete, and the `default` profile is now a real subdir like any other.
+
+### Changed
+
+- **Consolidated all Anyhide data under `~/.anyhide/`** (cross-platform: Unix uses `$HOME/.anyhide`, Windows uses `%USERPROFILE%\.anyhide`). Previously chat profiles and Tor data were split across OS-specific directories (`~/Library/Application Support/anyhide/` and `~/Library/Caches/anyhide/` on macOS, `~/.config/anyhide/` and `~/.local/share/anyhide/` and `~/.cache/anyhide/` on Linux). New unified layout:
+  - `~/.anyhide/chat.toml` — default chat profile
+  - `~/.anyhide/chat-<profile>.toml` — named chat profiles
+  - `~/.anyhide/contacts.toml` — contact aliases (already used this path)
+  - `~/.anyhide/contacts/` — public keys imported from chat identity QRs
+  - `~/.anyhide/state/tor/<profile>/` — persistent Tor state, including onion service keys; the default profile now lives at `state/tor/default/` instead of arti's own default location
+  - `~/.anyhide/cache/tor/<profile>/` — disposable Tor cache
+- New `anyhide::paths` module exposes `home()`, `state_dir()`, `cache_dir()`, `tor_state_dir()`, `tor_cache_dir()`, and `imported_contacts_dir()` as the single source of truth for filesystem layout.
+- `contacts::get_config_dir()` now delegates to `paths::home()`.
+
+### Migration
+
+This is a **breaking layout change**: existing chat identities (onion address, contacts, Tor state) will not be picked up automatically because the directories moved. To migrate:
+
+```sh
+# macOS
+mv ~/Library/Application\ Support/anyhide/chat*.toml ~/.anyhide/
+mv ~/Library/Application\ Support/anyhide/tor ~/.anyhide/state/tor
+mv ~/Library/Caches/anyhide/tor ~/.anyhide/cache/tor
+
+# Linux
+mv ~/.config/anyhide/chat*.toml ~/.anyhide/
+mv ~/.local/share/anyhide/tor ~/.anyhide/state/tor
+mv ~/.cache/anyhide/tor ~/.anyhide/cache/tor
+```
+
+Or simply delete the old directories and run `anyhide chat init` again to start fresh.
+
+### Added
+
+- New `anyhide::paths` module: single source of truth for all filesystem paths used by Anyhide. Replaces ad-hoc `dirs::config_dir() / data_dir() / cache_dir()` calls scattered across `commands/chat.rs`, `chat/transport/tor.rs`, and `contacts/mod.rs`.
+
 ## [0.14.1] - 2026-05-06
 
 ### Fixed

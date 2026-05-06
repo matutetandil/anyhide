@@ -80,6 +80,7 @@ pub mod contacts;
 pub mod crypto;
 pub mod decoder;
 pub mod encoder;
+pub mod paths;
 pub mod qr;
 pub mod text;
 

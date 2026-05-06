@@ -172,13 +172,10 @@ impl ContactsConfig {
     }
 }
 
-/// Get the Anyhide config directory.
-///
-/// Returns `~/.anyhide` on Unix or `%APPDATA%\anyhide` on Windows.
+/// Get the Anyhide config directory: `~/.anyhide` (Unix) or
+/// `%USERPROFILE%\.anyhide` (Windows).
 pub fn get_config_dir() -> Result<PathBuf, ContactsError> {
-    dirs::home_dir()
-        .map(|home| home.join(".anyhide"))
-        .ok_or(ContactsError::NoConfigDir)
+    crate::paths::home().map_err(|_| ContactsError::NoConfigDir)
 }
 
 /// Resolve a contact alias or path to an actual key path.

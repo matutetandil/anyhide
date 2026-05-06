@@ -190,18 +190,18 @@ impl ChatConfig2 {
         Ok(())
     }
 
-    /// Get the config file path.
+    /// Get the config file path: `~/.anyhide/chat.toml` (default profile)
+    /// or `~/.anyhide/chat-<profile>.toml` for named profiles.
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-            .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+        let home = anyhide::paths::home()
+            .map_err(|e| anyhow::anyhow!("Could not resolve Anyhide home: {}", e))?;
 
         let filename = match get_current_profile() {
             Some(profile) => format!("chat-{}.toml", profile),
             None => "chat.toml".to_string(),
         };
 
-        Ok(config_dir.join("anyhide").join(filename))
+        Ok(home.join(filename))
     }
 
     /// Find a contact by their signing public key bytes.
@@ -1179,11 +1179,9 @@ fn import_qr_contact(image: &PathBuf, name: &str) -> Result<()> {
     let (onion, enc_pubkey, sign_pubkey, nickname) = decode_chat_identity(&data)
         .context("Failed to decode chat identity from QR")?;
 
-    // Create temporary key files
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
-        .join("anyhide")
-        .join("contacts");
+    // Save imported public keys under ~/.anyhide/contacts/
+    let config_dir = anyhide::paths::imported_contacts_dir()
+        .map_err(|e| anyhow::anyhow!("Could not resolve contacts directory: {}", e))?;
 
     fs::create_dir_all(&config_dir)?;
 

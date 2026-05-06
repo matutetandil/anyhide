@@ -14,7 +14,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use arti_client::config::TorClientConfigBuilder;
-use arti_client::{DataStream, TorClient, TorClientConfig};
+use arti_client::{DataStream, TorClient};
 use tor_cell::relaycell::msg::Connected;
 use tor_hscrypto::pk::HsId;
 use tor_hsservice::{
@@ -109,48 +109,37 @@ impl AnyhideTorClient {
     /// Each profile gets its own state and cache directories, allowing
     /// multiple identities to run on the same machine.
     pub async fn with_profile(profile: Option<&str>) -> Result<Self, ChatError> {
-        let config = match profile {
-            Some(name) => {
-                // Get base directories
-                let data_dir = dirs::data_dir()
-                    .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
-                    .ok_or_else(|| ChatError::TorError("Could not find data directory".into()))?;
+        // All Tor state lives under ~/.anyhide/. The default profile is named
+        // "default" so it gets its own subdir alongside named profiles.
+        let profile_name = profile.unwrap_or("default");
 
-                let cache_dir = dirs::cache_dir()
-                    .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
-                    .ok_or_else(|| ChatError::TorError("Could not find cache directory".into()))?;
+        let state_dir = crate::paths::tor_state_dir(profile_name)
+            .map_err(|e| ChatError::TorError(format!("Could not resolve state dir: {}", e)))?;
+        let cache_path = crate::paths::tor_cache_dir(profile_name)
+            .map_err(|e| ChatError::TorError(format!("Could not resolve cache dir: {}", e)))?;
 
-                // Create profile-specific directories
-                let state_dir = data_dir.join("anyhide").join("tor").join(name);
-                let cache_path = cache_dir.join("anyhide").join("tor").join(name);
+        // Create directories if they don't exist with proper permissions (0700)
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| ChatError::TorError(format!("Failed to create state dir: {}", e)))?;
+        std::fs::create_dir_all(&cache_path)
+            .map_err(|e| ChatError::TorError(format!("Failed to create cache dir: {}", e)))?;
 
-                // Create directories if they don't exist with proper permissions (0700)
-                std::fs::create_dir_all(&state_dir).map_err(|e| {
-                    ChatError::TorError(format!("Failed to create state dir: {}", e))
-                })?;
-                std::fs::create_dir_all(&cache_path).map_err(|e| {
-                    ChatError::TorError(format!("Failed to create cache dir: {}", e))
-                })?;
+        // Set restrictive permissions (required by Arti for security)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&state_dir, perms.clone()).map_err(|e| {
+                ChatError::TorError(format!("Failed to set state dir permissions: {}", e))
+            })?;
+            std::fs::set_permissions(&cache_path, perms).map_err(|e| {
+                ChatError::TorError(format!("Failed to set cache dir permissions: {}", e))
+            })?;
+        }
 
-                // Set restrictive permissions (required by Arti for security)
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::Permissions::from_mode(0o700);
-                    std::fs::set_permissions(&state_dir, perms.clone()).map_err(|e| {
-                        ChatError::TorError(format!("Failed to set state dir permissions: {}", e))
-                    })?;
-                    std::fs::set_permissions(&cache_path, perms).map_err(|e| {
-                        ChatError::TorError(format!("Failed to set cache dir permissions: {}", e))
-                    })?;
-                }
-
-                TorClientConfigBuilder::from_directories(state_dir, cache_path)
-                    .build()
-                    .map_err(|e| ChatError::TorError(format!("Failed to build config: {}", e)))?
-            }
-            None => TorClientConfig::default(),
-        };
+        let config = TorClientConfigBuilder::from_directories(state_dir, cache_path)
+            .build()
+            .map_err(|e| ChatError::TorError(format!("Failed to build config: {}", e)))?;
 
         let client = TorClient::create_bootstrapped(config)
             .await

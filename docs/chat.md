@@ -272,3 +272,19 @@ Each profile gets separate config and Tor state directories.
 ## Data Persistence
 
 In ALL chat modes (normal or ephemeral), messages and session keys are NEVER written to disk. All cryptographic state is kept in RAM only and zeroized when the session ends. The only difference is whether the contact identity (onion address, public keys) is saved to `chat.toml`.
+
+### Storage Layout
+
+All Anyhide data lives under a single home directory: `~/.anyhide/` on Unix and `%USERPROFILE%\.anyhide\` on Windows.
+
+```
+~/.anyhide/
+├── chat.toml                      # default chat profile (identity + contacts)
+├── chat-<profile>.toml            # named chat profiles (when using --profile)
+├── contacts.toml                  # contact aliases used by encode/decode
+├── contacts/                      # public keys imported from QR identities
+├── state/tor/<profile>/           # persistent Tor state — onion service keys live here
+└── cache/tor/<profile>/           # disposable Tor cache
+```
+
+The `state/` directory must be preserved — deleting it discards your onion service identity. The `cache/` directory is safe to delete and will be repopulated on next bootstrap. The default chat profile uses `<profile>=default`.
