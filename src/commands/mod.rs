@@ -19,14 +19,16 @@ mod qr_info;
 mod qr_read;
 mod update;
 
-pub use chat::ChatCommand;
-pub use contacts::ContactsCommand;
+pub use chat::{ChatAction, ChatCommand};
+pub use contacts::{
+    ContactsAction, ContactsAddArgs, ContactsCommand, ContactsRemoveArgs, ContactsShowArgs,
+};
 pub use decode::DecodeCommand;
 pub use demo::{DemoAction, DemoCommand};
 pub use encode::EncodeCommand;
 pub use export_mnemonic::ExportMnemonicCommand;
 pub use fingerprint::FingerprintCommand;
-pub use import_mnemonic::ImportMnemonicCommand;
+pub use import_mnemonic::{ImportKeyType, ImportMnemonicCommand};
 pub use keygen::KeygenCommand;
 pub use multi_decrypt::MultiDecryptCommand;
 pub use multi_encrypt::MultiEncryptCommand;

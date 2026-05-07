@@ -9,8 +9,10 @@
 mod flows;
 mod helpers;
 
+use std::io::{self, BufRead};
+
 use anyhow::Result;
-use cliclack::{intro, log, outro, select};
+use cliclack::{clear_screen, intro, log, outro, select};
 use console::style;
 
 /// ANSI Shadow ANYHIDE banner with the 6-dot braille logo on the left.
@@ -46,24 +48,32 @@ fn print_banner() {
     println!();
 }
 
-/// Run the interactive wizard. Loops over the home menu until the user picks
-/// "Exit" (or presses Esc/Ctrl+C, which is caught and treated as Exit).
+/// Run the interactive wizard.
+///
+/// Each loop iteration is treated as an isolated "screen": the terminal is
+/// cleared and the banner + intro are repainted before the home select. After
+/// a flow finishes, the wizard pauses on a "Press Enter to return to menu"
+/// line so the user has time to read or copy the printed result before the
+/// next clear. This keeps the prompt-style UX (we don't manage a persistent
+/// dashboard like ratatui) while avoiding the indefinite scrollback that
+/// happens when each iteration just appends to stdout.
+///
+/// Esc/Ctrl+C on the home select is treated as Exit rather than a crash.
 pub fn run_wizard() -> Result<()> {
-    print_banner();
-    intro(style(" anyhide ").on_cyan().black())?;
-
     loop {
-        // Esc/Ctrl+C at the home menu cancels the prompt. cliclack returns
-        // io::Error in that case — we treat it as "exit" rather than crashing.
+        clear_screen()?;
+        print_banner();
+        intro(style(" anyhide ").on_cyan().black())?;
+
         let action_result = select("What would you like to do?")
             .item("encode", "Encode a message or file", "")
             .item("decode", "Decode a code", "")
             .item("keygen", "Generate keys", "")
             .item("demo", "Test mode (public demo)", "no keys needed")
-            .item("chat", "Open chat", "coming soon")
-            .item("contacts", "Manage contacts", "coming soon")
-            .item("qr", "QR codes", "coming soon")
-            .item("mnemonic", "Mnemonic backup", "coming soon")
+            .item("chat", "P2P chat over Tor", "")
+            .item("contacts", "Manage contacts", "")
+            .item("qr", "QR codes", "")
+            .item("mnemonic", "Mnemonic backup", "")
             .item("exit", "Exit", "")
             .interact();
 
@@ -75,38 +85,40 @@ pub fn run_wizard() -> Result<()> {
             }
         };
 
+        if action == "exit" {
+            outro("Bye!")?;
+            return Ok(());
+        }
+
         let result = match action {
             "encode" => flows::encode::run(),
             "decode" => flows::decode::run(),
             "keygen" => flows::keygen::run(),
             "demo" => flows::demo::run(),
-            "chat" | "contacts" | "qr" | "mnemonic" => {
-                log::info(format!(
-                    "'{}' wizard flow is coming in the next session — for now, run `anyhide {} --help`",
-                    action, command_hint(action)
-                ))?;
-                Ok(())
-            }
-            "exit" => {
-                outro("Bye!")?;
-                return Ok(());
-            }
+            "chat" => flows::chat::run(),
+            "contacts" => flows::contacts::run(),
+            "qr" => flows::qr::run(),
+            "mnemonic" => flows::mnemonic::run(),
             _ => Ok(()),
         };
 
         if let Err(e) = result {
             log::error(format!("{:#}", e))?;
         }
+
+        pause_for_ack();
     }
 }
 
-/// Maps an action key to the CLI subcommand name shown in the "coming soon" hint.
-fn command_hint(action: &str) -> &'static str {
-    match action {
-        "chat" => "chat",
-        "contacts" => "contacts",
-        "qr" => "qr-generate",
-        "mnemonic" => "export-mnemonic",
-        _ => "",
-    }
+/// Block until the user presses Enter, so they can read or copy the previous
+/// flow's output before the next clear_screen wipes it. Errors (e.g. Ctrl+C
+/// on the read) fall through silently — the home loop will clear and ask
+/// again, and the user can pick Exit.
+fn pause_for_ack() {
+    println!();
+    println!("  {}", style("Press Enter to return to menu...").dim());
+    let stdin = io::stdin();
+    let mut buf = String::new();
+    let _ = stdin.lock().read_line(&mut buf);
 }
+
