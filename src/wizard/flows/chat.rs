@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use cliclack::{input, log, outro, select};
+use cliclack::{input, log, note, outro, select};
 
 use crate::commands::{ChatAction, ChatCommand, CommandExecutor, KeygenCommand};
 use crate::wizard::helpers::{prompt_existing_path, prompt_path_with_default, BACK, BACK_LABEL};
@@ -18,7 +18,11 @@ pub fn run() -> Result<()> {
     log::info("P2P encrypted chat over Tor (hybrid PQ handshake)")?;
 
     let action: &str = select("Chat action")
-        .item("init", "Initialize my chat identity", "creates an .onion address")
+        .item(
+            "init",
+            "Set up chat (first time)",
+            "generate keys + register .onion address",
+        )
         .item("me", "Show my identity", "address + key fingerprints")
         .item("open", "Open chat with a contact", "starts the chat TUI")
         .item("list", "List chat contacts", "")
@@ -50,7 +54,31 @@ pub fn run() -> Result<()> {
     log::step("Running chat command...")?;
     cmd.execute()?;
 
-    outro("Done.")?;
+    // Init is a one-time setup. Without an explicit next-step hint here, users
+    // think the wizard "ended without doing anything" because init only stages
+    // the identity — it doesn't open a chat. Surface the natural follow-ups so
+    // the gap between "I set up" and "I can chat" is bridged.
+    match action {
+        "init" => {
+            note(
+                "Next steps",
+                "Your identity is ready. To actually chat:\n\
+                 \n\
+                 1. Share your .onion + public keys with a peer\n\
+                    • Easiest: 'Export my identity to QR' (single image they scan)\n\
+                    • Or send the three values printed above (.onion + .pub + .sign.pub)\n\
+                 \n\
+                 2. Add the peer on your side\n\
+                    • 'Import contact from QR' if they sent you a QR\n\
+                    • Or 'Add a chat contact' if they sent raw .onion + keys\n\
+                 \n\
+                 3. 'Open chat with a contact' to start chatting",
+            )?;
+            outro("Chat identity ready.")?;
+        }
+        _ => outro("Done.")?,
+    }
+
     Ok(())
 }
 
