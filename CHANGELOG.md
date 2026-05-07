@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-07
+
+### Highlights
+
+This release adds an interactive wizard mode that opens automatically when you run `anyhide` with no subcommand. The wizard covers every command surface — encode, decode, keygen, demo, chat, contacts, QR, and mnemonic flows — guiding new users through identity setup, message encoding, key management, and chat without making them memorize CLI flags. The CLI itself is unchanged; the wizard is purely a discoverable front door for newcomers and an opt-in convenience for everyone else.
+
+The release also introduces a public demo mode (`anyhide demo encode/decode/info`) with a baked-in keypair, passphrase, and carrier so people can experiment with Anyhide without first generating an identity. Demo output is decodable by anyone running anyhide — the warning is blunt about this — but it makes README examples copy-pasteable and lowers the onboarding barrier dramatically.
+
 ### Added
 
 - **Interactive wizard mode**: running `anyhide` without a subcommand now opens a guided TUI menu (powered by `cliclack`) covering every command surface — encode, decode, keygen, demo, chat, contacts, QR, and mnemonic flows. Subcommands continue to work exactly as before for scripting and power users; the wizard is purely a discoverable front door.
