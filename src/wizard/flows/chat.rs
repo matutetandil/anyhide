@@ -8,10 +8,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cliclack::{input, log, outro, select};
 
-use crate::commands::{ChatAction, ChatCommand, CommandExecutor};
+use crate::commands::{ChatAction, ChatCommand, CommandExecutor, KeygenCommand};
 use crate::wizard::helpers::{prompt_existing_path, prompt_path_with_default, BACK, BACK_LABEL};
 
 pub fn run() -> Result<()> {
@@ -79,23 +79,112 @@ fn default_with_action(action: ChatAction) -> ChatCommand {
     }
 }
 
+/// Build the `ChatCommand` for `Init`, generating identity keys under
+/// `~/.anyhide/<nickname>.{pub,key,sign.pub,sign.key}` if they don't exist.
+///
+/// First-run UX: the user only types a nickname; everything else is derived.
+/// On re-run, existing keys are reused (no overwrite). This matches the
+/// post-v0.15.0 filesystem layout where Anyhide owns `~/.anyhide/` and
+/// stores its own state there instead of asking the user for arbitrary paths.
 fn build_init() -> Result<ChatCommand> {
-    let nickname: String = input("Nickname for your hidden service")
+    let nickname: String = input("Nickname for your chat identity")
         .default_input("anyhide-chat")
+        .validate(|s: &String| {
+            let t = s.trim();
+            if t.is_empty() {
+                Err("Nickname cannot be empty.")
+            } else if t.contains('/') || t.contains('\\') {
+                Err("Nickname cannot contain path separators.")
+            } else {
+                Ok(())
+            }
+        })
         .interact()?;
-    let key = prompt_existing_path(
-        "Encryption key pair base path (e.g. './me' for me.pub/me.key)",
-        "./me",
-    )?;
-    let sign_key = prompt_existing_path("Signing key pair base path", "./me")?;
+    let nickname = nickname.trim().to_string();
+
+    // Resolve `~/.anyhide/<nickname>` as the base path. The encryption files
+    // become `<base>.pub`/`<base>.key`, the signing files become
+    // `<base>.sign.pub`/`<base>.sign.key` — same convention `KeygenCommand`
+    // already uses for `--output`.
+    let home = anyhide::paths::home().context("Failed to resolve ~/.anyhide directory")?;
+    std::fs::create_dir_all(&home)
+        .with_context(|| format!("Failed to create {}", home.display()))?;
+    let key_base = home.join(&nickname);
+
+    ensure_identity_keys(&key_base)?;
+
     Ok(ChatCommand {
         action: Some(ChatAction::Init {
-            nickname: nickname.trim().to_string(),
-            key,
-            sign_key,
+            nickname,
+            key: key_base.clone(),
+            sign_key: key_base,
         }),
         ..default_chat_command()
     })
+}
+
+/// Generate hybrid PQ identity keys at `<key_base>` if they don't already
+/// exist. Reuses any complete set on disk; bails on a partial/corrupt state
+/// rather than silently regenerating (would orphan the contact's view of us).
+fn ensure_identity_keys(key_base: &PathBuf) -> Result<()> {
+    let pub_path = key_base.with_extension("pub");
+    let key_path = key_base.with_extension("key");
+    let sign_pub_path = with_extra_ext(key_base, "sign.pub");
+    let sign_key_path = with_extra_ext(key_base, "sign.key");
+
+    let parts = [&pub_path, &key_path, &sign_pub_path, &sign_key_path];
+    let exists: Vec<bool> = parts.iter().map(|p| p.exists()).collect();
+
+    if exists.iter().all(|e| *e) {
+        log::info(format!(
+            "Reusing existing identity keys at {}.{{pub,key,sign.pub,sign.key}}",
+            key_base.display()
+        ))?;
+        return Ok(());
+    }
+
+    if exists.iter().any(|e| *e) {
+        anyhow::bail!(
+            "Inconsistent identity at {}: some of .pub/.key/.sign.pub/.sign.key exist but not all. \
+             Remove or rename them and try again.",
+            key_base.display()
+        );
+    }
+
+    log::info(format!(
+        "Generating hybrid PQ identity at {}.{{pub,key,sign.pub,sign.key}}",
+        key_base.display()
+    ))?;
+
+    let keygen = KeygenCommand {
+        output: key_base.clone(),
+        ephemeral: false,
+        contact: None,
+        eph_keys: None,
+        eph_pubs: None,
+        eph_file: None,
+        show_mnemonic: false,
+        hybrid: true,
+    };
+    keygen.execute().context("Failed to generate identity keys")?;
+
+    log::remark(format!(
+        "Tip: back up your keys with `anyhide export-mnemonic {}` (and {})",
+        key_path.display(),
+        sign_key_path.display()
+    ))?;
+
+    Ok(())
+}
+
+/// Append a multi-segment extension like `sign.pub` to a base path. Rust's
+/// `with_extension` only handles single segments, so we splice manually to
+/// match `KeygenCommand`'s naming (`<base>.sign.pub`).
+fn with_extra_ext(base: &PathBuf, ext: &str) -> PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
 }
 
 fn build_open() -> Result<ChatCommand> {
