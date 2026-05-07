@@ -4,12 +4,14 @@
 //! Uses pre-shared carriers (any file) - only encrypted codes are transmitted.
 
 mod commands;
+mod demo;
+mod wizard;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    ChatCommand, CommandExecutor, ContactsCommand, DecodeCommand, EncodeCommand,
+    ChatCommand, CommandExecutor, ContactsCommand, DecodeCommand, DemoCommand, EncodeCommand,
     ExportMnemonicCommand, FingerprintCommand, ImportMnemonicCommand, KeygenCommand,
     MultiDecryptCommand, MultiEncryptCommand, QrGenerateCommand, QrInfoCommand, QrReadCommand,
     UpdateCommand,
@@ -34,7 +36,7 @@ use commands::{
 #[command(long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -87,12 +89,22 @@ enum Commands {
 
     /// Update anyhide to the latest version
     Update(UpdateCommand),
+
+    /// Public demo mode — encode/decode using baked-in keys (no privacy, for testing only)
+    Demo(DemoCommand),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(cmd) => dispatch(cmd),
+        None => wizard::run_wizard(),
+    }
+}
+
+fn dispatch(cmd: Commands) -> Result<()> {
+    match cmd {
         Commands::Keygen(cmd) => cmd.execute(),
         Commands::Encode(cmd) => cmd.execute(),
         Commands::Decode(cmd) => cmd.execute(),
@@ -107,5 +119,6 @@ fn main() -> Result<()> {
         Commands::QrRead(cmd) => cmd.execute(),
         Commands::QrInfo(cmd) => cmd.execute(),
         Commands::Update(cmd) => cmd.execute(),
+        Commands::Demo(cmd) => cmd.execute(),
     }
 }

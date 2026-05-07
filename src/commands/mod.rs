@@ -6,6 +6,7 @@
 mod chat;
 mod contacts;
 mod decode;
+mod demo;
 mod encode;
 mod export_mnemonic;
 mod fingerprint;
@@ -21,6 +22,7 @@ mod update;
 pub use chat::ChatCommand;
 pub use contacts::ContactsCommand;
 pub use decode::DecodeCommand;
+pub use demo::{DemoAction, DemoCommand};
 pub use encode::EncodeCommand;
 pub use export_mnemonic::ExportMnemonicCommand;
 pub use fingerprint::FingerprintCommand;
