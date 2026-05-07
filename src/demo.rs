@@ -51,7 +51,7 @@ pub fn recipient_public_key() -> PublicKey {
 
 /// Plain-text warning printed before every demo operation. The wording is
 /// deliberately blunt so users cannot mistake demo mode for real privacy.
-pub const WARNING: &str = "WARNING: demo mode — this code is decodable by anyone with anyhide.\n         Use `anyhide encode` (or the wizard's Encode flow) for real privacy.\n         Note: decoded messages may contain extra whitespace between words.";
+pub const WARNING: &str = "WARNING: demo mode — this code is decodable by anyone with anyhide.\n         Use `anyhide encode` (or the wizard's Encode flow) for real privacy.";
 
 #[cfg(test)]
 mod tests {

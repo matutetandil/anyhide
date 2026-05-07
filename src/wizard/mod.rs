@@ -13,14 +13,22 @@ use anyhow::Result;
 use cliclack::{intro, log, outro, select};
 use console::style;
 
-/// Block-style ANYHIDE banner. Width 43, height 5, fits any terminal >= 60 cols.
-/// Cyan styling matches the project brand color (#22D3EE in the dev.to covers).
-const ANYHIDE_BANNER_LINES: [&str; 5] = [
-    " █████  ███   ██ ██   ██ ██ ██████  ███████",
-    "██   ██ ████  ██  ██ ██  ██ ██   ██ ██     ",
-    "███████ ██ ██ ██   ███   ██ ██   ██ █████  ",
-    "██   ██ ██  ████    ██   ██ ██   ██ ██     ",
-    "██   ██ ██   ███    ██   ██ ██████  ███████",
+/// ANSI Shadow ANYHIDE banner with the 6-dot braille logo on the left.
+///
+/// Logo (cols 0-4) reproduces the same 6-dot pattern as the chat TUI's `⠿`
+/// app icon: three rows of `██ ██` separated by blank rows so each dot is
+/// visually distinct (without the gaps the columns merge into solid bars).
+/// Banner reads "ANYHIDE" in ANSI Shadow font (6 rows × 54 cols, the
+/// box-drawing chars `╔╗╚╝═║` give the 3D-shadow effect). Total width 63,
+/// fits any terminal ≥ 80 cols. Cyan styling matches the project brand
+/// color (#22D3EE in the dev.to covers).
+const ANYHIDE_BANNER_LINES: [&str; 6] = [
+    "██ ██     █████╗ ███╗   ██╗██╗   ██╗██╗  ██╗██╗██████╗ ███████╗",
+    "         ██╔══██╗████╗  ██║╚██╗ ██╔╝██║  ██║██║██╔══██╗██╔════╝",
+    "██ ██    ███████║██╔██╗ ██║ ╚████╔╝ ███████║██║██║  ██║█████╗  ",
+    "         ██╔══██║██║╚██╗██║  ╚██╔╝  ██╔══██║██║██║  ██║██╔══╝  ",
+    "██ ██    ██║  ██║██║ ╚████║   ██║   ██║  ██║██║██████╔╝███████╗",
+    "         ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝",
 ];
 
 /// Print the ASCII art banner with cyan styling and a tagline below.

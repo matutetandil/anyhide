@@ -56,7 +56,7 @@ impl CommandExecutor for DemoCommand {
 }
 
 fn demo_encode(message: &str) -> Result<()> {
-    let carrier = Carrier::from_bytes(demo::CARRIER.as_bytes().to_vec());
+    let carrier = Carrier::from_text(demo::CARRIER);
     let pubkey = demo::recipient_public_key();
     // min_coverage = 1.0: forces exact substring matching, which is what the
     // decoder also expects. Looser values would cause the encoder to emit
@@ -79,7 +79,7 @@ fn demo_encode(message: &str) -> Result<()> {
 }
 
 fn demo_decode(code: &str) -> Result<()> {
-    let carrier = Carrier::from_bytes(demo::CARRIER.as_bytes().to_vec());
+    let carrier = Carrier::from_text(demo::CARRIER);
     let secret = demo::recipient_secret_key();
     let config = DecoderConfig {
         verbose: false,
@@ -124,15 +124,15 @@ fn preview(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Roundtrip: every word of the original message must appear in the
-    /// decoded output. Anyhide's encoder fragments messages into carrier
-    /// substrings and may emit extra whitespace between fragments — exact
-    /// byte-equal roundtrip is not a property of the encoder. This mirrors
-    /// the assertion style used by `tests/integration_tests.rs`.
+    /// Roundtrip: byte-equal recovery of the original message. Demo mode
+    /// uses the text carrier path (`Carrier::from_text`), where the encoder
+    /// fragments along word boundaries and the decoder reinserts the
+    /// inter-word spaces exactly once. This matches the contract verified
+    /// by `tests/integration_tests::test_exact_case_matching`.
     #[test]
-    fn demo_roundtrip_preserves_message_words() {
+    fn demo_roundtrip_returns_original_message() {
         let original = "Hello world 123";
-        let carrier = Carrier::from_bytes(demo::CARRIER.as_bytes().to_vec());
+        let carrier = Carrier::from_text(demo::CARRIER);
         let pubkey = demo::recipient_public_key();
         let secret = demo::recipient_secret_key();
 
@@ -161,14 +161,7 @@ mod tests {
             &dec_config,
         );
 
-        for word in original.split_whitespace() {
-            assert!(
-                decoded.message.contains(word),
-                "decoded message '{}' missing word '{}'",
-                decoded.message,
-                word
-            );
-        }
+        assert_eq!(decoded.message, original);
     }
 
     #[test]
