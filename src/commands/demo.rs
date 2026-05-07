@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use console::style;
 
 use anyhide::{
     decode_with_carrier_config, encode_with_carrier_config, Carrier, DecoderConfig, EncoderConfig,
@@ -15,6 +16,10 @@ use anyhide::{
 
 use super::CommandExecutor;
 use crate::demo;
+
+/// Width of the visual separator drawn above/below demo output. Picked to be
+/// wider than typical terminal labels but narrow enough to render on 80-col.
+const SEPARATOR_WIDTH: usize = 50;
 
 /// Public demo mode — encode or decode messages using a baked-in keypair,
 /// carrier, and passphrase. Useful for trying Anyhide without generating an
@@ -74,7 +79,7 @@ fn demo_encode(message: &str) -> Result<()> {
     let encoded =
         encode_with_carrier_config(&carrier, message, demo::PASSPHRASE, &pubkey, &config)
             .context("Demo encoding failed — the demo carrier may not contain every character of your message. Try plain ASCII text.")?;
-    println!("{}", encoded.code);
+    print_delimited("Anyhide code (base64)", &encoded.code);
     Ok(())
 }
 
@@ -87,8 +92,24 @@ fn demo_decode(code: &str) -> Result<()> {
     };
     let decoded =
         decode_with_carrier_config(code, &carrier, demo::PASSPHRASE, &secret, &config);
-    println!("{}", decoded.message);
+    print_delimited("Decoded message", &decoded.message);
     Ok(())
+}
+
+/// Print `content` (the actual demo output that callers may want to pipe)
+/// to stdout, surrounded by labelled separator lines on stderr. Splitting the
+/// streams keeps `anyhide demo encode "..." | anyhide demo decode` working
+/// even though we add visual framing for interactive use.
+fn print_delimited(label: &str, content: &str) {
+    eprintln!();
+    eprintln!(
+        "{}",
+        style(format!("── {} {}", label, "─".repeat(SEPARATOR_WIDTH.saturating_sub(label.len() + 4))))
+            .cyan()
+            .bold()
+    );
+    println!("{}", content);
+    eprintln!("{}", style("─".repeat(SEPARATOR_WIDTH)).dim());
 }
 
 fn demo_info() -> Result<()> {
